@@ -1,0 +1,198 @@
+# DocETL Pipeline for Extracting Dataset References from Scientific Papers
+# This pipeline processes PDF/HTML scientific papers and extracts structured dataset references
+
+parsing_tools:
+  - name: pymupdf_pdf_parser
+    function_code: |
+      def pymupdf_pdf_parser(document: Dict) -> List[Dict]:
+          import fitz  # PyMuPDF
+          from pathlib import Path
+          
+          pdf_path = document["pdf_path"]
+          
+          # Check if file exists
+          if not Path(pdf_path).exists():
+              return [{"paper_content": f"ERROR: File not found: {pdf_path}"}]
+          
+          try:
+              # Open PDF
+              doc = fitz.open(pdf_path)
+              
+              # Extract text from all pages
+              text = ""
+              for page in doc:
+                  text += page.get_text()
+              
+              doc.close()
+              
+              # Return extracted text
+              return [{"paper_content": text}]
+          except Exception as e:
+              return [{"paper_content": f"ERROR: Failed to parse {pdf_path}: {str(e)}"}]
+
+datasets:
+  scientific_papers:
+    type: file
+    source: local
+    path: "papers_input.json"
+    parsing:
+      - function: pymupdf_pdf_parser
+
+default_model: gpt-4o-mini
+
+system_prompt:
+  dataset_description: "A collection of scientific research papers in PDF or HTML format"
+  persona: "A research data specialist analyzing scientific publications to identify and catalog dataset usage"
+
+operations:
+  # Step 1: Extract dataset references from each paper
+  - name: extract_datasets
+    type: map
+    prompt: |
+      Analyze the following scientific paper content:
+      
+      {{ input.paper_content }}
+      
+      Extract ALL dataset references mentioned in this paper. For each dataset, identify:
+      1. Dataset identifier/name (e.g., "ImageNet", "MNIST", "COVID-19 Open Research Dataset")
+      2. Repository or data source (e.g., "Kaggle", "UCI Machine Learning Repository", "GitHub", "institutional repository")
+      3. URL or DOI if explicitly mentioned
+      
+      Look for datasets in:
+      - Data/Methods sections
+      - Acknowledgments
+      - References
+      - Availability statements
+      - Supplementary materials mentions
+      
+      Return a list of all datasets found. If no URL is explicitly mentioned, leave it as an empty string.
+      If no repository is mentioned, leave it as an empty string.
+      If no datasets are found, return an empty list.
+    output:
+      schema:
+        datasets: "list[{dataset_identifier: string, repository: string, url: string}]"
+    validate:
+      - isinstance(output["datasets"], list)
+    num_retries_on_validate_failure: 2
+
+  # Step 2: Unnest the datasets list so each dataset is a separate item
+  - name: unnest_datasets
+    type: unnest
+    unnest_key: datasets
+
+  # Step 2.5: Flatten the nested datasets object to top-level fields
+  - name: flatten_dataset_fields
+    type: map
+    prompt: |
+      Extract the dataset fields from the nested structure and return them as top-level fields.
+      The dataset information is: {{ input.datasets }}
+      
+      Return the following fields at the top level:
+      - dataset_identifier: {{ input.datasets.dataset_identifier }}
+      - repository: {{ input.datasets.repository }}
+      - url: {{ input.datasets.url }}
+    output:
+      schema:
+        dataset_identifier: string
+        repository: string
+        url: string
+
+  # Step 3: Filter out empty/invalid dataset entries
+  - name: filter_valid_datasets
+    type: filter
+    prompt: |
+      Review this dataset entry:
+      
+      Dataset Identifier: {{ input.dataset_identifier }}
+      Repository: {{ input.repository }}
+      URL: {{ input.url }}
+      
+      Is this a valid, real dataset reference (not a placeholder, generic term, or empty entry)?
+      Return true only if the dataset_identifier is specific and meaningful.
+    output:
+      schema:
+        valid: bool
+
+  # Step 4: Resolve similar dataset names to standardize entries
+  - name: resolve_datasets
+    type: resolve
+    blocking_keys:
+      - dataset_identifier
+    blocking_threshold: 0.7
+    comparison_prompt: |
+      Compare these two dataset references:
+      
+      Dataset 1: {{ input1.dataset_identifier }}
+      Repository 1: {{ input1.repository }}
+      
+      Dataset 2: {{ input2.dataset_identifier }}
+      Repository 2: {{ input2.repository }}
+      
+      Are these referring to the same dataset? Consider:
+      - Similar names with slight variations (e.g., "ImageNet-1K" vs "ImageNet 1000")
+      - Same repository and similar identifiers
+      - Common abbreviations or full names
+    embedding_model: text-embedding-3-small
+    resolution_prompt: |
+      Given these matched dataset references:
+      {% for entry in inputs %}
+      Entry {{ loop.index }}:
+        - Name: {{ entry.dataset_identifier }}
+        - Repository: {{ entry.repository }}
+        - URL: {{ entry.url }}
+      {% endfor %}
+      
+      Determine the best standardized dataset name and consolidate the information:
+      - Use the most complete and commonly used name
+      - If multiple URLs exist, prefer DOIs or official repository links
+      - Consolidate repository information
+    output:
+      schema:
+        dataset_identifier: string
+        repository: string
+        url: string
+
+  # Step 5: Aggregate all papers using each dataset
+  - name: aggregate_dataset_usage
+    type: reduce
+    reduce_key:
+      - dataset_identifier
+    prompt: |
+      This dataset "{{ reduce_key }}" appears in {{ inputs|length }} paper(s):
+      
+      {% for paper in inputs %}
+      Paper {{ loop.index }}:
+        - PDF Path: {{ paper.pdf_path }}
+        - Repository Info: {{ paper.repository }}
+        - URL: {{ paper.url }}
+      {% endfor %}
+      
+      Provide a consolidated record for this dataset with:
+      1. The standardized dataset name
+      2. The most authoritative repository information
+      3. The best available URL (prefer DOIs, then official repository links)
+      4. Count of papers using this dataset
+      5. List of paper file paths
+    output:
+      schema:
+        dataset_identifier: string
+        repository: string
+        url: string
+        num_papers: int
+        paper_paths: list[string]
+
+pipeline:
+  steps:
+    - name: extract_dataset_references
+      input: scientific_papers
+      operations:
+        - extract_datasets
+        - unnest_datasets
+        - flatten_dataset_fields
+        - filter_valid_datasets
+        - resolve_datasets
+        - aggregate_dataset_usage
+  output:
+    type: file
+    path: "dataset_references_output.json"
+    intermediate_dir: "intermediate_results"
