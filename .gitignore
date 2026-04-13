@@ -11,6 +11,7 @@ __pycache__/
 # DocETL cache and intermediate files
 .cache/
 intermediate_results/
+papers/
 
 # Output files
 dataset_references_output.json
