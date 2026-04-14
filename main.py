@@ -21,7 +21,8 @@ class PipelineRunner:
     """Main runner for DocETL pipelines."""
     
     def __init__(self):
-        self.pipelines_dir = Path(__file__).parent
+        self.project_root = Path(__file__).parent
+        self.pipelines_dir = self.project_root / "pipelines"
         self.pdf_pipeline = self.pipelines_dir / "pipeline_pdf.yaml"
         self.xml_pipeline = self.pipelines_dir / "pipeline_xml.yaml"
     
@@ -124,7 +125,7 @@ def print_usage():
     print("\nPipelines:")
     print("  • PDF/HTML: Extracts datasets from PDF and HTML papers")
     print("  • XML:      Extracts datasets from PubMed Central XML papers")
-    print("\nUtility Scripts (in ../scripts/):")
+    print("\nUtility Scripts (in scripts/):")
     print("  • utils.py:          Analyze and export pipeline results")
     print("  • download_papers.py: Download papers from various sources")
     print("\nExamples:")
