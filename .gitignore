@@ -1,5 +1,6 @@
 # Python virtual environment
 docetl/
+docetl_venv/
 venv/
 env/
 *.pyc
@@ -11,9 +12,9 @@ __pycache__/
 # DocETL cache and intermediate files
 .cache/
 intermediate_results/
-papers/
 
-# Output files
+# Output files (data/output/ contains pipeline results)
+data/output/
 dataset_references_output.json
 datasets.csv
 

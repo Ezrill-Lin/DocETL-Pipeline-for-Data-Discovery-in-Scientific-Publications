@@ -1,47 +1,47 @@
-# DocETL Pipeline for Extracting Dataset References from Scientific Papers
-# This pipeline processes PDF/HTML scientific papers and extracts structured dataset references
+# DocETL Pipeline for Extracting Dataset References from Scientific Papers (XML Format)
+# This pipeline processes XML scientific papers and extracts structured dataset references
 
 parsing_tools:
-  - name: pymupdf_pdf_parser
+  - name: xml_text_parser
     function_code: |
-      def pymupdf_pdf_parser(document: Dict) -> List[Dict]:
-          import fitz  # PyMuPDF
+      def xml_text_parser(document: Dict) -> List[Dict]:
           from pathlib import Path
+          import re
           
-          pdf_path = document["pdf_path"]
+          xml_path = document["xml_path"]
           
           # Check if file exists
-          if not Path(pdf_path).exists():
-              return [{"paper_content": f"ERROR: File not found: {pdf_path}"}]
+          if not Path(xml_path).exists():
+              return [{"paper_content": f"ERROR: File not found: {xml_path}"}]
           
           try:
-              # Open PDF
-              doc = fitz.open(pdf_path)
+              # Read XML file as text
+              with open(xml_path, 'r', encoding='utf-8') as f:
+                  xml_content = f.read()
               
-              # Extract text from all pages
-              text = ""
-              for page in doc:
-                  text += page.get_text()
-              
-              doc.close()
+              # Remove XML tags to get plain text (simple approach)
+              # This keeps the content readable for LLM analysis
+              text = re.sub(r'<[^>]+>', ' ', xml_content)
+              # Clean up multiple spaces
+              text = re.sub(r'\s+', ' ', text)
               
               # Return extracted text
-              return [{"paper_content": text}]
+              return [{"paper_content": text.strip()}]
           except Exception as e:
-              return [{"paper_content": f"ERROR: Failed to parse {pdf_path}: {str(e)}"}]
+              return [{"paper_content": f"ERROR: Failed to parse {xml_path}: {str(e)}"}]
 
 datasets:
   scientific_papers:
     type: file
     source: local
-    path: "papers_input.json"
+    path: "../data/input/xml/xml_papers_input.json"
     parsing:
-      - function: pymupdf_pdf_parser
+      - function: xml_text_parser
 
 default_model: gpt-4o-mini
 
 system_prompt:
-  dataset_description: "A collection of scientific research papers in PDF or HTML format"
+  dataset_description: "A collection of scientific research papers in XML format"
   persona: "A research data specialist analyzing scientific publications to identify and catalog dataset usage"
 
 operations:
@@ -54,16 +54,17 @@ operations:
       {{ input.paper_content }}
       
       Extract ALL dataset references mentioned in this paper. For each dataset, identify:
-      1. Dataset identifier/name (e.g., "ImageNet", "MNIST", "COVID-19 Open Research Dataset")
-      2. Repository or data source (e.g., "Kaggle", "UCI Machine Learning Repository", "GitHub", "institutional repository")
+      1. Dataset identifier/name (e.g., "ImageNet", "MNIST", "COVID-19 Open Research Dataset", accession codes like "GSE12345", "PXD123456")
+      2. Repository or data source (e.g., "GenBank", "GEO", "PRIDE", "ProteomeXchange", "dbGaP", "PubMed Central")
       3. URL or DOI if explicitly mentioned
       
       Look for datasets in:
       - Data/Methods sections
       - Acknowledgments
+      - Data availability statements
       - References
-      - Availability statements
       - Supplementary materials mentions
+      - Dataset accession sections
       
       Return a list of all datasets found. If no URL is explicitly mentioned, leave it as an empty string.
       If no repository is mentioned, leave it as an empty string.
@@ -162,7 +163,7 @@ operations:
       
       {% for paper in inputs %}
       Paper {{ loop.index }}:
-        - PDF Path: {{ paper.pdf_path }}
+        - XML Path: {{ paper.xml_path }}
         - Repository Info: {{ paper.repository }}
         - URL: {{ paper.url }}
       {% endfor %}
@@ -194,5 +195,5 @@ pipeline:
         - aggregate_dataset_usage
   output:
     type: file
-    path: "dataset_references_output.json"
-    intermediate_dir: "intermediate_results"
+    path: "../data/output/xml_results/xml_dataset_references_output.json"
+    intermediate_dir: "../intermediate_results/xml_pipeline"

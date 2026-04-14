@@ -1,44 +1,262 @@
-# DocETL Pipeline for Dataset Discovery in Scientific Publications
+# DocETL Pipeline for Dataset Reference Extraction from Scientific Publications
 
-This project uses DocETL to build an ETL pipeline that extracts dataset references from scientific papers (PDF or HTML format) and outputs structured dataset information.
+An automated pipeline using DocETL and large language models to extract structured dataset references from scientific papers (PDF, HTML, XML formats).
 
-## Features
+## 📁 Project Structure
 
-- **Automatic Dataset Extraction**: Uses LLMs to identify dataset references in scientific papers
-- **Multi-format Support**: Handles PDF files (with OCR support) and can be extended for HTML
-- **Dataset Resolution**: Automatically identifies and merges similar dataset names
-- **Structured Output**: Produces clean JSON output with dataset identifiers, repositories, and URLs
-- **Paper Tracking**: Maintains links between datasets and the papers that use them
+```
+DocETL-Pipeline-for-Data-Discovery-in-Scientific-Publications/
+├── pipelines/                      # 🎯 Main pipeline directory
+│   ├── main.py                    # ⭐ Main entry point - run this!
+│   ├── pipeline_pdf.yaml          # PDF/HTML papers pipeline config
+│   └── pipeline_xml.yaml          # XML papers pipeline config
+│
+├── data/                          # All data files
+│   ├── input/                     # Input papers
+│   │   ├── pdf/                   # PDF papers and papers_input.json
+│   │   ├── xml/                   # XML papers and xml_papers_input.json
+│   │   └── html/                  # HTML papers (future)
+│   ├── output/                    # Pipeline results
+│   │   ├── pdf_results/          # PDF pipeline outputs
+│   │   └── xml_results/          # XML pipeline outputs
+│   └── groundtruth/              # Evaluation datasets
+│       ├── EXP_groundtruth.csv
+│       └── Full_REV_dataset_citation_records_Table.parquet
+│
+├── scripts/                       # 🛠️ Utility scripts (not for direct pipeline execution)
+│   ├── etl.py                    # Analysis and export utilities
+│   └── download_papers.py        # Paper download utilities
+│
+├── docs/                         # Documentation
+│   ├── README.md                 # Main project documentation
+│   ├── PARSING_INFO.md           # Parsing details
+│   └── xml_pipeline_README.md    # XML pipeline guide
+│
+├── intermediate_results/          # Temporary processing files
+│   ├── pdf_pipeline/             # PDF pipeline intermediates
+│   └── xml_pipeline/             # XML pipeline intermediates
+│
+├── docetl/                       # Virtual environment (not in git)
+├── .env.example                  # Environment variables template
+├── .gitignore                    # Git ignore rules
+└── README.md                     # This file
+```
 
-## Prerequisites
+## 🚀 Quick Start
 
-- Python 3.10 or later
-- OpenAI API key (or other LLM provider)
-- DocETL with parsing extras installed
+### Prerequisites
 
-## Installation
+1. **Python 3.12+** installed
+2. **OpenAI API Key** (set as environment variable)
 
-1. **Create and activate the virtual environment** (already done):
-   ```bash
-   .\docetl\Scripts\Activate.ps1
-   ```
+### Installation
 
-2. **Install DocETL with parsing extras**:
-   ```bash
-   pip install docetl[parsing]
-   ```
+```bash
+# Clone the repository
+git clone <repository-url>
+cd DocETL-Pipeline-for-Data-Discovery-in-Scientific-Publications
 
-3. **Set up your OpenAI API key**:
-   
-   Create a `.env` file in the project directory:
-   ```
-   OPENAI_API_KEY=your_api_key_here
-   ```
-   
-   Or set it as an environment variable:
-   ```bash
-   $env:OPENAI_API_KEY="your_api_key_here"
-   ```
+# Create and activate virtual environment
+python -m venv docetl
+.\docetl\Scripts\Activate.ps1  # Windows PowerShell
+# or: source docetl/bin/activate  # Linux/Mac
+
+# Install dependencies
+pip install docetl[parsing] litellm
+
+# Set your OpenAI API key
+$env:OPENAI_API_KEY = "your-api-key-here"  # Windows PowerShell
+# or: export OPENAI_API_KEY="your-api-key-here"  # Linux/Mac
+```
+
+### Running the Pipelines
+
+The easiest way to run the pipelines is using the **main.py** script:
+
+```bash
+# Navigate to pipelines directory
+cd pipelines
+
+# Run PDF pipeline
+python main.py pdf
+
+# Run XML pipeline
+python main.py xml
+
+# Run both pipelines
+python main.py all
+
+# Run with optimization
+python main.py pdf --optimize
+```
+
+**Alternative: Direct DocETL commands**
+
+```bash
+# Navigate to pipelines directory
+cd pipelines
+
+# PDF Pipeline
+docetl run pipeline_pdf.yaml
+# Output: ../data/output/pdf_results/dataset_references_output.json
+
+# XML Pipeline
+docetl run pipeline_xml.yaml
+# Output: ../data/output/xml_results/xml_dataset_references_output.json
+```
+
+## 📊 Output Format
+
+Both pipelines produce JSON output with structured dataset references:
+
+```json
+[
+  {
+    "dataset_identifier": "DataRef-EXP",
+    "repository": "PubMed Central",
+    "url": "https://pmc.ncbi.nlm.nih.gov/",
+    "num_papers": 1,
+    "paper_paths": [
+      "data/input/pdf/2025.sdp-1.10.pdf"
+    ]
+  }
+]
+```
+
+## 🔧 Pipeline Architecture
+
+Each pipeline consists of 6 operations:
+
+1. **extract_datasets** - LLM extracts dataset mentions from paper text
+2. **unnest_datasets** - Separates each dataset into individual records
+3. **flatten_dataset_fields** - Extracts nested fields to top level
+4. **filter_valid_datasets** - Removes invalid/placeholder entries
+5. **resolve_datasets** - Groups similar dataset names together
+6. **aggregate_dataset_usage** - Consolidates info and counts paper usage
+
+## 📝 Adding New Papers
+
+### PDF Papers
+
+1. Place PDF files in `data/input/pdf/`
+2. Update `data/input/pdf/papers_input.json`:
+
+```json
+[
+  {
+    "paper_id": "unique_id",
+    "title": "Paper Title",
+    "pdf_path": "data/input/pdf/filename.pdf"
+  }
+]
+```
+
+3. Run `docetl run pipeline_pdf.yaml` from `pipelines/` directory
+
+### XML Papers
+
+1. Place XML files in `data/input/xml/`
+2. Regenerate input file:
+
+```bash
+python -c "import json; from pathlib import Path; papers = [{'paper_id': f.stem, 'title': f.stem, 'xml_path': f'data/input/xml/{f.name}'} for f in Path('data/input/xml').glob('*.xml')]; json.dump(papers, open('data/input/xml/xml_papers_input.json', 'w'), indent=2)"
+```
+
+3. Run `docetl run pipeline_xml.yaml` from `pipelines/` directory
+
+## 📚 Documentation
+
+- **[docs/README.md](docs/README.md)** - Detailed project documentation
+- **[docs/PARSING_INFO.md](docs/PARSING_INFO.md)** - Information about parsing libraries
+- **[docs/xml_pipeline_README.md](docs/xml_pipeline_README.md)** - XML pipeline specifics
+
+## 🧪 Evaluation
+
+Ground truth datasets for evaluation are stored in `data/groundtruth/`:
+
+- `EXP_groundtruth.csv` - Manually curated expert dataset (21 papers, 48 references)
+- `Full_REV_dataset_citation_records_Table.parquet` - Large-scale reverse-engineered dataset (244,847 papers, 397,263 references)
+
+## 🛠️ Utility Scripts (scripts/ directory)
+
+The `scripts/` folder contains helper utilities for supporting tasks. These are NOT used for running the main pipeline (use `pipelines/main.py` for that).
+
+### scripts/etl.py - Analysis & Export Utilities
+
+Provides additional functionality for pipeline outputs:
+
+```bash
+# Analyze pipeline results
+python scripts/etl.py analyze
+
+# Export results to CSV
+python scripts/etl.py export
+
+# Run analysis on specific file
+python scripts/etl.py analyze --file data/output/pdf_results/dataset_references_output.json
+```
+
+Commands:
+- `prepare` - Scan papers directory and create input.json
+- `run` - Execute the pipeline
+- `analyze` - Generate statistics and visualizations
+- `export` - Convert JSON output to CSV
+
+### scripts/download_papers.py - Paper Download Utility
+
+Downloads papers from PubMed Central using E-utilities API.
+
+```bash
+python scripts/download_papers.py
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+Copy `.env.example` to `.env` and configure:
+
+```bash
+OPENAI_API_KEY=your-api-key-here
+```
+
+### Pipeline Customization
+
+Edit YAML files in `pipelines/` to:
+- Change LLM models (default: gpt-4o-mini)
+- Modify extraction prompts
+- Adjust validation rules
+- Configure output schemas
+
+## 📦 Dependencies
+
+Core dependencies:
+- `docetl[parsing]` - DocETL with parsing extras
+- `litellm` - LLM provider interface
+- `PyMuPDF (fitz)` - PDF text extraction
+- `openai` - OpenAI API client
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Submit a pull request
+
+## 📄 License
+
+[Your License Here]
+
+## 🙏 Acknowledgments
+
+- Built with [DocETL](https://github.com/ucbepic/docetl)
+- Uses OpenAI's GPT models for extraction
+- Based on research from "Data Gatherer: LLM-Powered Dataset Reference Extraction from Scientific Literature"
+
+## 📞 Contact
+
+[Your Contact Information]
+
 
 ## Project Structure
 
