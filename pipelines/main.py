@@ -125,7 +125,7 @@ def print_usage():
     print("  • PDF/HTML: Extracts datasets from PDF and HTML papers")
     print("  • XML:      Extracts datasets from PubMed Central XML papers")
     print("\nUtility Scripts (in ../scripts/):")
-    print("  • etl.py:            Analyze and export pipeline results")
+    print("  • utils.py:          Analyze and export pipeline results")
     print("  • download_papers.py: Download papers from various sources")
     print("\nExamples:")
     print("  python main.py pdf")

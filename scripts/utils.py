@@ -1,7 +1,7 @@
 """
-DocETL Pipeline Helper for Dataset Extraction from Scientific Papers
+Utility Functions for DocETL Dataset Extraction Pipeline
 
-This script provides utilities to run the DocETL pipeline and prepare input data.
+This script provides helper utilities for input preparation, result analysis, and data export.
 """
 
 import json
@@ -50,33 +50,6 @@ def create_papers_input(papers_directory: str = "papers", output_file: str = "pa
     
     print(f"Created {output_file} with {len(papers)} papers")
     print(f"Papers found: {[p['title'] for p in papers]}")
-
-
-def run_pipeline(pipeline_file: str = "pipeline.yaml") -> None:
-    """
-    Run the DocETL pipeline.
-    
-    Args:
-        pipeline_file: Path to pipeline YAML file
-    """
-    import subprocess
-    
-    print(f"Running DocETL pipeline: {pipeline_file}")
-    result = subprocess.run(
-        ["docetl", "run", pipeline_file],
-        capture_output=True,
-        text=True
-    )
-    
-    print(result.stdout)
-    if result.stderr:
-        print("Errors/Warnings:", result.stderr)
-    
-    if result.returncode == 0:
-        print("\nPipeline completed successfully!")
-        print("Check 'dataset_references_output.json' for results")
-    else:
-        print(f"\nPipeline failed with exit code {result.returncode}")
 
 
 def analyze_output(output_file: str = "dataset_references_output.json") -> None:
@@ -163,34 +136,22 @@ if __name__ == "__main__":
     import sys
     
     if len(sys.argv) < 2:
-        print("DocETL Pipeline Helper for Dataset Extraction")
+        print("DocETL Pipeline Utility Functions")
         print("\nUsage:")
-        print("  python etl.py prepare    - Create input JSON from papers directory")
-        print("  python etl.py run        - Run the DocETL pipeline")
-        print("  python etl.py analyze    - Analyze pipeline output")
-        print("  python etl.py export     - Export results to CSV")
-        print("  python etl.py all        - Run all steps sequentially")
+        print("  python utils.py prepare    - Create input JSON from papers directory")
+        print("  python utils.py analyze    - Analyze pipeline output")
+        print("  python utils.py export     - Export results to CSV")
+        print("\nNote: To run pipelines, use pipelines/main.py instead")
         sys.exit(1)
     
     command = sys.argv[1].lower()
     
     if command == "prepare":
         create_papers_input()
-    elif command == "run":
-        run_pipeline()
     elif command == "analyze":
         analyze_output()
     elif command == "export":
         export_to_csv()
-    elif command == "all":
-        print("Step 1: Preparing input data...")
-        create_papers_input()
-        print("\nStep 2: Running pipeline...")
-        run_pipeline()
-        print("\nStep 3: Analyzing results...")
-        analyze_output()
-        print("\nStep 4: Exporting to CSV...")
-        export_to_csv()
     else:
         print(f"Unknown command: {command}")
-        print("Valid commands: prepare, run, analyze, export, all")
+        print("Valid commands: prepare, analyze, export")
