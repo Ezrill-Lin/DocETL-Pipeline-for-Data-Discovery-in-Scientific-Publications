@@ -19,7 +19,9 @@ dataset_references_output.json
 datasets.csv
 
 # Input papers (optional - uncomment if you don't want to commit papers)
-# papers/*.pdf
+papers/*.pdf
+*.pdf
+
 
 # IDE files
 .vscode/

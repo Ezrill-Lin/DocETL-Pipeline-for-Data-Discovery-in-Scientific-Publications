@@ -124,39 +124,82 @@ datasets:
     source: local
     path: "../data/input/xml/xml_papers_input.json"
     parsing:
-      - function: xml_text_parser
+      - function: xml_section_parser
 
 default_model: gpt-4o-mini
 
 system_prompt:
-  dataset_description: "A collection of scientific research papers in XML format"
+  dataset_description: "A collection of scientific research papers in XML format, processed section-by-section"
   persona: "A research data specialist analyzing scientific publications to identify and catalog dataset usage"
 
 operations:
-  # Step 1: Extract dataset references from each paper
-  - name: extract_datasets
+  # Step 1: Split papers into individual sections (decomposition)
+  # This is DocETL's key strength - breaking documents into manageable chunks
+  - name: split_into_sections
+    type: unnest
+    unnest_key: sections
+    keep_empty: false
+
+  # Step 2: Filter for sections likely to contain dataset references
+  # This implements the "Reduce" part of RTR (Reduce-Then-Retrieve)
+  - name: filter_relevant_sections
+    type: filter
+    prompt: |
+      Section Title: {{ input.sections.title }}
+      Section Type: {{ input.sections.type }}
+      
+      First 200 characters of content: {{ input.sections.content[:200] }}...
+      
+      Is this section likely to contain dataset references or data availability information?
+      
+      Look for sections about:
+      - Methods or Materials and Methods
+      - Data Availability
+      - Data Sharing
+      - Datasets or Data Sources
+      - Supplementary Information
+      - Acknowledgements (sometimes contains dataset info)
+      - Results (may mention specific datasets)
+      
+      Exclude:
+      - References/Bibliography (unless explicitly a data citation section)
+      - Pure introduction/background sections
+      - Abstract (unless paper is specifically about a dataset)
+      
+      Return true if this section is likely relevant for dataset extraction.
+    output:
+      schema:
+        is_relevant: bool
+
+  # Step 3: Extract dataset references from relevant sections
+  # This implements the "Retrieve" part of RTR - targeted extraction
+  - name: extract_datasets_from_section
     type: map
     prompt: |
-      Analyze the following scientific paper content:
+      From this scientific paper section, extract dataset references:
       
-      {{ input.paper_content }}
+      Section: {{ input.sections.title }}
+      Content: {{ input.sections.content }}
       
-      Extract ALL dataset references mentioned in this paper. For each dataset, identify:
-      1. Dataset identifier/name (e.g., "ImageNet", "MNIST", "COVID-19 Open Research Dataset", accession codes like "GSE12345", "PXD123456")
-      2. Repository or data source (e.g., "GenBank", "GEO", "PRIDE", "ProteomeXchange", "dbGaP", "PubMed Central")
-      3. URL or DOI if explicitly mentioned
+      Extract ALL dataset identifiers mentioned. Look for:
+      - Accession codes (GSE#####, PXD#####, phs######, SRP####, etc.)
+      - Named datasets (specific database entries, not just database names)
+      - DOIs that point to datasets
+      - Dataset URLs or repository links
       
-      Look for datasets in:
-      - Data/Methods sections
-      - Acknowledgments
-      - Data availability statements
-      - References
-      - Supplementary materials mentions
-      - Dataset accession sections
+      For each dataset found, provide:
+      1. dataset_identifier: The specific ID or name (e.g., "GSE60052", "PDC000234")
+      2. repository: The database/repository name (e.g., "GEO", "ProteomeXchange", "dbGaP")
+      3. url: Any URL or DOI mentioned (if available)
       
-      Return a list of all datasets found. If no URL is explicitly mentioned, leave it as an empty string.
-      If no repository is mentioned, leave it as an empty string.
-      If no datasets are found, return an empty list.
+      IMPORTANT:
+      - Extract ONLY specific dataset identifiers, NOT general database names
+      - "GEO" alone is NOT a dataset - "GSE60052" IS a dataset
+      - "ProteomeXchange" alone is NOT a dataset - "PXD052949" IS a dataset
+      - Exclude funding agency identifiers
+      - Exclude software or tool names unless they are datasets
+      
+      If no specific datasets are found in this section, return an empty list.
     output:
       schema:
         datasets: "list[{dataset_identifier: string, repository: string, url: string}]"
@@ -164,104 +207,114 @@ operations:
       - isinstance(output["datasets"], list)
     num_retries_on_validate_failure: 2
 
-  # Step 2: Unnest the datasets list so each dataset is a separate item
+  # Step 4: Fallback - extract from full paper if no datasets found in filtered sections
+  # This ensures we don't miss datasets in unexpected locations
+  - name: whole_document_fallback
+    type: gather
+    gather_key: paper_id
+    gather_prompt: |
+      This paper was split into {{ inputs|length }} sections and processed individually.
+      
+      Datasets found across sections:
+      {% for section in inputs %}
+      Section "{{ section.sections.title }}": {{ section.datasets|length }} dataset(s)
+      {% endfor %}
+      
+      Total datasets found: {{ inputs|sum(attribute='datasets')|length if inputs else 0 }}
+      
+      {% if inputs|sum(attribute='datasets')|length == 0 %}
+      No datasets were found in any section. This might indicate:
+      1. The paper genuinely uses no datasets
+      2. Datasets are mentioned in an unusual format or location
+      
+      Review the paper one more time holistically. If you find any datasets we missed,
+      extract them now. Otherwise, confirm no datasets exist.
+      {% else %}
+      Consolidate the datasets found across all sections, removing any duplicates.
+      {% endif %}
+    output:
+      schema:
+        all_datasets: "list[{dataset_identifier: string, repository: string, url: string}]"
+
+  # Step 5: Unnest the consolidated datasets
   - name: unnest_datasets
     type: unnest
-    unnest_key: datasets
+    unnest_key: all_datasets
+    keep_empty: false
 
-  # Step 2.5: Flatten the nested datasets object to top-level fields
+  # Step 6: Flatten the nested dataset structure
   - name: flatten_dataset_fields
     type: map
     prompt: |
-      Extract the dataset fields from the nested structure and return them as top-level fields.
-      The dataset information is: {{ input.datasets }}
+      Extract dataset fields from: {{ input.all_datasets }}
       
-      Return the following fields at the top level:
-      - dataset_identifier: {{ input.datasets.dataset_identifier }}
-      - repository: {{ input.datasets.repository }}
-      - url: {{ input.datasets.url }}
+      Return as top-level fields:
+      - dataset_identifier: {{ input.all_datasets.dataset_identifier }}
+      - repository: {{ input.all_datasets.repository }}
+      - url: {{ input.all_datasets.url }}
     output:
       schema:
         dataset_identifier: string
         repository: string
         url: string
 
-  # Step 3: Filter out empty/invalid dataset entries
+  # Step 7: Filter out invalid entries
   - name: filter_valid_datasets
     type: filter
     prompt: |
-      Review this dataset entry:
-      
-      Dataset Identifier: {{ input.dataset_identifier }}
+      Dataset: {{ input.dataset_identifier }}
       Repository: {{ input.repository }}
-      URL: {{ input.url }}
       
-      Is this a valid, real dataset reference (not a placeholder, generic term, or empty entry)?
-      Return true only if the dataset_identifier is specific and meaningful.
+      Is this a valid, specific dataset identifier?
+      
+      Valid examples: GSE60052, PXD052949, phs003416.v1.p1, PDC000234
+      Invalid examples: GEO, ProteomeXchange, PRIDE (just database names)
+      Invalid examples: Funding IDs, software names, general database mentions
+      
+      Return true only if this is a specific dataset identifier.
     output:
       schema:
         valid: bool
 
-  # Step 4: Resolve similar dataset names to standardize entries
+  # Step 8: Resolve similar dataset identifiers
   - name: resolve_datasets
     type: resolve
     blocking_keys:
       - dataset_identifier
     blocking_threshold: 0.7
     comparison_prompt: |
-      Compare these two dataset references:
+      Dataset 1: {{ input1.dataset_identifier }} ({{ input1.repository }})
+      Dataset 2: {{ input2.dataset_identifier }} ({{ input2.repository }})
       
-      Dataset 1: {{ input1.dataset_identifier }}
-      Repository 1: {{ input1.repository }}
-      
-      Dataset 2: {{ input2.dataset_identifier }}
-      Repository 2: {{ input2.repository }}
-      
-      Are these referring to the same dataset? Consider:
-      - Similar names with slight variations (e.g., "ImageNet-1K" vs "ImageNet 1000")
-      - Same repository and similar identifiers
-      - Common abbreviations or full names
+      Are these the same dataset? Consider case variations and version suffixes.
     embedding_model: text-embedding-3-small
     resolution_prompt: |
-      Given these matched dataset references:
+      Consolidate these dataset references:
       {% for entry in inputs %}
-      Entry {{ loop.index }}:
-        - Name: {{ entry.dataset_identifier }}
-        - Repository: {{ entry.repository }}
-        - URL: {{ entry.url }}
+      - {{ entry.dataset_identifier }} ({{ entry.repository }}) - {{ entry.url }}
       {% endfor %}
       
-      Determine the best standardized dataset name and consolidate the information:
-      - Use the most complete and commonly used name
-      - If multiple URLs exist, prefer DOIs or official repository links
-      - Consolidate repository information
+      Provide the canonical identifier and best repository/URL information.
     output:
       schema:
         dataset_identifier: string
         repository: string
         url: string
 
-  # Step 5: Aggregate all papers using each dataset
+  # Step 9: Aggregate by dataset to count paper usage
   - name: aggregate_dataset_usage
     type: reduce
     reduce_key:
       - dataset_identifier
     prompt: |
-      This dataset "{{ reduce_key }}" appears in {{ inputs|length }} paper(s):
+      Dataset "{{ reduce_key }}" appears in {{ inputs|length }} paper(s).
       
-      {% for paper in inputs %}
-      Paper {{ loop.index }}:
-        - XML Path: {{ paper.xml_path }}
-        - Repository Info: {{ paper.repository }}
-        - URL: {{ paper.url }}
-      {% endfor %}
+      Papers: {% for paper in inputs %}{{ paper.xml_path }}{% if not loop.last %}, {% endif %}{% endfor %}
       
-      Provide a consolidated record for this dataset with:
-      1. The standardized dataset name
-      2. The most authoritative repository information
-      3. The best available URL (prefer DOIs, then official repository links)
-      4. Count of papers using this dataset
-      5. List of paper file paths
+      Consolidate:
+      1. Best repository name: {% for p in inputs if p.repository %}{{ p.repository }}{% break %}{% endfor %}
+      2. Best URL: {% for p in inputs if p.url %}{{ p.url }}{% break %}{% endfor %}
+      3. Paper count and paths
     output:
       schema:
         dataset_identifier: string
@@ -275,12 +328,15 @@ pipeline:
     - name: extract_dataset_references
       input: scientific_papers
       operations:
-        - extract_datasets
-        - unnest_datasets
-        - flatten_dataset_fields
-        - filter_valid_datasets
-        - resolve_datasets
-        - aggregate_dataset_usage
+        - split_into_sections           # Decompose papers into sections
+        - filter_relevant_sections       # Reduce to relevant sections (RTR pattern)
+        - extract_datasets_from_section  # Extract from focused sections
+        - whole_document_fallback        # Gather and fallback if needed
+        - unnest_datasets                # Unpack consolidated datasets
+        - flatten_dataset_fields         # Flatten nested structure
+        - filter_valid_datasets          # Clean invalid entries
+        - resolve_datasets               # Deduplicate similar identifiers
+        - aggregate_dataset_usage        # Aggregate by dataset
   output:
     type: file
     path: "../data/output/xml_results/xml_dataset_references_output.json"
