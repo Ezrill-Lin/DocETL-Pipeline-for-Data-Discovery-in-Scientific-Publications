@@ -207,58 +207,29 @@ operations:
       - isinstance(output["datasets"], list)
     num_retries_on_validate_failure: 2
 
-  # Step 4: Fallback - extract from full paper if no datasets found in filtered sections
-  # This ensures we don't miss datasets in unexpected locations
-  - name: whole_document_fallback
-    type: gather
-    gather_key: paper_id
-    gather_prompt: |
-      This paper was split into {{ inputs|length }} sections and processed individually.
-      
-      Datasets found across sections:
-      {% for section in inputs %}
-      Section "{{ section.sections.title }}": {{ section.datasets|length }} dataset(s)
-      {% endfor %}
-      
-      Total datasets found: {{ inputs|sum(attribute='datasets')|length if inputs else 0 }}
-      
-      {% if inputs|sum(attribute='datasets')|length == 0 %}
-      No datasets were found in any section. This might indicate:
-      1. The paper genuinely uses no datasets
-      2. Datasets are mentioned in an unusual format or location
-      
-      Review the paper one more time holistically. If you find any datasets we missed,
-      extract them now. Otherwise, confirm no datasets exist.
-      {% else %}
-      Consolidate the datasets found across all sections, removing any duplicates.
-      {% endif %}
-    output:
-      schema:
-        all_datasets: "list[{dataset_identifier: string, repository: string, url: string}]"
-
-  # Step 5: Unnest the consolidated datasets
+  # Step 4: Unnest datasets extracted from each relevant section
   - name: unnest_datasets
     type: unnest
-    unnest_key: all_datasets
+    unnest_key: datasets
     keep_empty: false
 
-  # Step 6: Flatten the nested dataset structure
+  # Step 5: Flatten the nested dataset structure
   - name: flatten_dataset_fields
     type: map
     prompt: |
-      Extract dataset fields from: {{ input.all_datasets }}
+      Extract dataset fields from: {{ input.datasets }}
       
       Return as top-level fields:
-      - dataset_identifier: {{ input.all_datasets.dataset_identifier }}
-      - repository: {{ input.all_datasets.repository }}
-      - url: {{ input.all_datasets.url }}
+      - dataset_identifier: {{ input.datasets.dataset_identifier }}
+      - repository: {{ input.datasets.repository }}
+      - url: {{ input.datasets.url }}
     output:
       schema:
         dataset_identifier: string
         repository: string
         url: string
 
-  # Step 7: Filter out invalid entries
+  # Step 6: Filter out invalid entries
   - name: filter_valid_datasets
     type: filter
     prompt: |
@@ -276,7 +247,7 @@ operations:
       schema:
         valid: bool
 
-  # Step 8: Resolve similar dataset identifiers
+  # Step 7: Resolve similar dataset identifiers
   - name: resolve_datasets
     type: resolve
     blocking_keys:
@@ -301,7 +272,7 @@ operations:
         repository: string
         url: string
 
-  # Step 9: Aggregate by dataset to count paper usage
+  # Step 8: Aggregate by dataset to count paper usage
   - name: aggregate_dataset_usage
     type: reduce
     reduce_key:
@@ -311,10 +282,10 @@ operations:
       
       Papers: {% for paper in inputs %}{{ paper.xml_path }}{% if not loop.last %}, {% endif %}{% endfor %}
       
-      Consolidate:
-      1. Best repository name: {% for p in inputs if p.repository %}{{ p.repository }}{% break %}{% endfor %}
-      2. Best URL: {% for p in inputs if p.url %}{{ p.url }}{% break %}{% endfor %}
-      3. Paper count and paths
+      Consolidate these entries into one final record.
+      Choose the best repository name from the non-empty repository values.
+      Choose the best URL from the non-empty URL values.
+      Include the final paper count and paper paths.
     output:
       schema:
         dataset_identifier: string
@@ -331,7 +302,6 @@ pipeline:
         - split_into_sections           # Decompose papers into sections
         - filter_relevant_sections       # Reduce to relevant sections (RTR pattern)
         - extract_datasets_from_section  # Extract from focused sections
-        - whole_document_fallback        # Gather and fallback if needed
         - unnest_datasets                # Unpack consolidated datasets
         - flatten_dataset_fields         # Flatten nested structure
         - filter_valid_datasets          # Clean invalid entries
