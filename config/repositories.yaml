@@ -1,0 +1,221 @@
+# Repository definitions: prefix patterns, canonical name, and URL templates.
+# The {id} placeholder is replaced with the normalized identifier.
+
+repositories:
+  - canonical: GEO
+    aliases:
+      - Gene Expression Omnibus
+      - NCBI GEO
+      - GEO
+      - www.ncbi.nlm.nih.gov/geo
+      - ncbi.nlm.nih.gov/geo
+    prefixes: [GSE, GSM, GPL]
+    url_template: "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={id}"
+
+  - canonical: GEO
+    aliases: []
+    prefixes: [GDS]
+    url_template: "https://www.ncbi.nlm.nih.gov/sites/GDSbrowser?acc={id}"
+
+  - canonical: PRIDE
+    aliases:
+      - PRIDE Archive
+      - PRIDE
+      - EBI PRIDE
+      - www.ebi.ac.uk
+      - ebi.ac.uk
+      - www.ebi.ac.uk/pride
+      - ebi.ac.uk/pride
+    prefixes: [PXD]
+    url_template: "https://www.ebi.ac.uk/pride/archive/projects/{id}"
+
+  - canonical: ProteomeXchange
+    aliases:
+      - ProteomeXchange
+      - ProteomeCentral
+      - PX
+    prefixes: []
+    url_template: "https://proteomecentral.proteomexchange.org/cgi/GetDataset?ID={id}"
+
+  - canonical: MassIVE
+    aliases:
+      - Massive
+      - MassIVE
+      - UCSD MassIVE
+      - massive.ucsd.edu
+      - www.massive.ucsd.edu
+    prefixes: [MSV]
+    url_template: "https://massive.ucsd.edu/ProteoSAFe/dataset.jsp?accession={id}"
+
+  - canonical: jPOST
+    aliases:
+      - jPOST
+      - jPOSTrepo
+      - jpostdb.org
+      - repository.jpostdb.org
+      - www.jpostdb.org
+    prefixes: [JPST]
+    url_template: "https://repository.jpostdb.org/entry/{id}"
+
+  - canonical: iProX
+    aliases:
+      - iProX
+      - iprox.cn
+      - www.iprox.cn
+      - www.iprox.org
+      - iprox.org
+    prefixes: [IPX]
+    url_template: "https://www.iprox.cn/page/project.html?id={id}"
+
+  - canonical: PeptideAtlas
+    aliases:
+      - PeptideAtlas
+      - PASS
+    prefixes: [PASS]
+    url_template: "https://www.peptideatlas.org/PASS/{id}"
+
+  - canonical: PanoramaPublic
+    aliases:
+      - Panorama Public
+      - PanoramaPublic
+      - Panorama
+    prefixes: []
+    url_template: ""
+
+  - canonical: ArrayExpress
+    aliases:
+      - ArrayExpress
+      - EBI ArrayExpress
+      - BioStudies ArrayExpress
+    prefixes: ["E-MTAB", "E-GEOD", "E-PROT", "E-MEXP"]
+    url_template: "https://www.ebi.ac.uk/biostudies/arrayexpress/studies/{id}"
+
+  - canonical: SRA
+    aliases:
+      - Sequence Read Archive
+      - SRA
+      - NCBI SRA
+      - www.ncbi.nlm.nih.gov/sra
+      - ncbi.nlm.nih.gov/sra
+    prefixes: [SRP, SRR, SRX, SRS, SRA]
+    url_template: "https://www.ncbi.nlm.nih.gov/sra/?term={id}"
+
+  - canonical: BioProject
+    aliases:
+      - BioProject
+      - NCBI BioProject
+      - www.ncbi.nlm.nih.gov/bioproject
+      - ncbi.nlm.nih.gov/bioproject
+    prefixes: [PRJNA, PRJEB, PRJDB]
+    url_template: "https://www.ncbi.nlm.nih.gov/bioproject/{id}"
+
+  - canonical: BioSample
+    aliases:
+      - BioSample
+      - NCBI BioSample
+    prefixes: [SAMN, SAMEA, SAMD]
+    url_template: "https://www.ncbi.nlm.nih.gov/biosample/{id}"
+
+  - canonical: ENA
+    aliases:
+      - ENA
+      - European Nucleotide Archive
+    prefixes: [ERP, ERR, ERX, ERS]
+    url_template: "https://www.ebi.ac.uk/ena/browser/view/{id}"
+
+  - canonical: Dryad
+    aliases:
+      - Dryad
+      - Dryad Digital Repository
+    prefixes: []
+    url_template: "https://doi.org/{id}"
+
+  - canonical: Zenodo
+    aliases:
+      - Zenodo
+    prefixes: []
+    url_template: "https://doi.org/{id}"
+
+  - canonical: Figshare
+    aliases:
+      - Figshare
+      - figshare
+    prefixes: []
+    url_template: "https://doi.org/{id}"
+
+  - canonical: Dataverse
+    aliases:
+      - Dataverse
+      - Harvard Dataverse
+    prefixes: []
+    url_template: "https://doi.org/{id}"
+
+  - canonical: MendeleyData
+    aliases:
+      - Mendeley Data
+      - MendeleyData
+    prefixes: []
+    url_template: "https://doi.org/{id}"
+
+  - canonical: dbGaP
+    aliases:
+      - dbGaP
+      - dbGap
+      - dbGAP
+      - dBGaP
+      - database of Genotypes and Phenotypes
+      - www.ncbi.nlm.nih.gov/projects/gap
+      - ncbi.nlm.nih.gov/projects/gap
+    prefixes: [phs]
+    url_template: "https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={id}"
+
+  - canonical: PDB
+    aliases:
+      - PDB
+      - Protein Data Bank
+      - RCSB PDB
+      - wwPDB
+      - www.rcsb.org
+      - rcsb.org
+      - www.wwpdb.org
+    prefixes: []
+    url_template: "https://www.rcsb.org/structure/{id}"
+
+  - canonical: EGA
+    aliases:
+      - EGA
+      - European Genome-Phenome Archive
+      - European Genome Phenome Archive
+      - ega-archive.org
+      - www.ega-archive.org
+    prefixes: [EGAS, EGAD]
+    url_template: "https://ega-archive.org/studies/{id}"
+
+  - canonical: DepMap
+    aliases:
+      - DepMap
+      - Dependency Map
+      - Cancer Dependency Map
+    prefixes: []
+    url_template: "https://depmap.org/portal/download/all/?releasename={id}"
+
+  - canonical: PDC
+    aliases:
+      - PDC
+      - Proteomic Data Commons
+      - Proteomic Data Commons (PDC)
+    prefixes: [PDC]
+    url_template: "https://pdc.cancer.gov/pdc/study/{id}"
+
+  - canonical: HumanProteinAtlas
+    aliases:
+      - Human Protein Atlas
+      - HPA
+    prefixes: []
+    url_template: "https://www.proteinatlas.org/{id}"
+
+  - canonical: DOI
+    aliases:
+      - DOI
+    prefixes: []
+    url_template: "https://doi.org/{id}"

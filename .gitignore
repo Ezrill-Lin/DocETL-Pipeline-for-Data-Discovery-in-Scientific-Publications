@@ -1,38 +1,17 @@
-# Python virtual environment
-docetl/
-docetl_venv/
-venv/
-env/
-*.pyc
-__pycache__/
-
-# Environment variables
 .env
-
-# DocETL cache and intermediate files
-.cache/
-intermediate_results/
-
-# Output files (data/output/ contains pipeline results)
-data/output/
-dataset_references_output.json
-datasets.csv
-
-# Input papers (optional - uncomment if you don't want to commit papers)
-papers/*.pdf
-*.pdf
-
-
-# IDE files
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Logs
+__pycache__/
+*.pyc
+.pytest_cache/
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/benchmark/*
+!data/benchmark/.gitkeep
+data/predictions/*
+!data/predictions/.gitkeep
+outputs/*
+!outputs/.gitkeep
+.docetl_cache/
 *.log
+.DS_Store

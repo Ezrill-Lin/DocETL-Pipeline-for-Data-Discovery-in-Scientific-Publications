@@ -1,117 +1,169 @@
-# DocETL Pipeline for Scientific Paper Dataset Extraction
+# Dataset Reference Extraction with DocETL
 
-This project runs two DocETL pipelines over scientific papers:
+A DocETL-based pipeline that extracts dataset references (accession numbers,
+repository names, DOIs) from scientific papers, and an evaluation harness
+that scores it against the **DataRef-EXP** / **DataRef-REV** benchmarks
+released alongside [DataGatherer](https://github.com/VIDA-NYU/data-gatherer).
 
-- a PDF pipeline using `PyMuPDF`
-- an XML pipeline using section-aware XML parsing
+The pipeline emits one row per (paper, dataset reference):
 
-Both pipelines extract dataset references and write normalized JSON outputs.
-
-## Project Layout
-
-```text
-DocETL-Pipeline-for-Data-Discovery-in-Scientific-Publications/
-├── data/
-│   ├── groundtruth/
-│   ├── input/
-│   │   ├── html/
-│   │   ├── pdf/
-│   │   └── xml/
-│   └── output/
-├── docetl_venv/
-├── intermediate_results/
-├── pipelines/
-│   ├── pipeline_pdf.yaml
-│   └── pipeline_xml.yaml
-├── scripts/
-│   ├── download_papers.py
-│   ├── download_papers_pdf.py
-│   ├── eval.py
-│   └── utils.py
-├── .env.example
-├── .gitignore
-└── main.py
+```json
+{"paper_id": "PMC1234567", "paper_doi": "10.x/yz",
+ "dataset_identifier": "PXD009876", "repository": "PRIDE",
+ "url": "https://www.ebi.ac.uk/pride/archive/projects/PXD009876"}
 ```
 
-## Requirements
+## Why this design
 
-- Python 3.12+
-- A working project virtual environment at `docetl_venv/`
-- `OPENAI_API_KEY`
+- **Hybrid retrieval + LLM extraction.** Pure heading-based extraction
+  misses references buried in inline text and figure captions; pure
+  LLM-on-full-text is wasteful. We pre-select candidate passages by
+  heading match *and* by regex over repository names and accession-shaped
+  tokens, then ask the LLM to extract from the (much smaller) candidate
+  text.
+- **Deterministic URL construction.** The LLM extracts identifiers and
+  repository names but never URLs. URLs are templated in Python
+  (`src/extraction/url_builder.py`) from `config/repositories.yaml`. If
+  the repository is unknown, the URL field stays empty rather than being
+  fabricated.
 
-`main.py` uses the project-local executable at `docetl_venv/Scripts/docetl.exe`. It does not depend on a globally installed `docetl`.
+## Setup
 
-## Environment Setup
-
-Create `.env` from `.env.example` or set variables in your shell.
-
-```powershell
-$env:OPENAI_API_KEY = "your-api-key"
+```bash
+pip install -r requirements.txt
+cp .env.example .env
+# fill in OPENAI_API_KEY (or ANTHROPIC_API_KEY) and DOCETL_MODEL
 ```
 
-Optional:
+`DOCETL_MODEL` selects the LiteLLM-compatible model (e.g. `gpt-4o-mini`,
+`claude-haiku-4-5-20251001`).
 
-```powershell
-$env:DOCETL_MAX_THREADS = "2"
+## Project layout
+
+```
+config/                 repositories + settings
+pipelines/              DocETL pipeline YAML
+src/preprocess/         HTML / PDF → structured paper records
+src/extraction/         DocETL runner + URL builder + output normalization
+src/evaluation/         ground truth loader + matcher + metrics
+src/baselines/          DataGatherer wrapper (best-effort)
+src/reporting/          Markdown report generator
+scripts/                CLI entry points
+tests/                  pytest unit tests
+data/                   raw papers, processed JSON, benchmark, predictions
+outputs/                metrics + final report
 ```
 
-Use `DOCETL_MAX_THREADS` if your API tier hits rate limits under the default DocETL concurrency.
+## How to run
 
-## Running the Pipelines
+### 1. Download benchmark ground truth
 
-Run commands from the project root:
-
-```powershell
-python main.py pdf
-python main.py xml
-python main.py all
-python main.py help
+```bash
+python scripts/download_benchmarks.py
 ```
 
-What `main.py` does:
+Pulls every file from Zenodo record `15549086` into `data/benchmark/`. If
+network access is blocked, follow the manual instructions printed by the
+script and place the CSV ground-truth file there yourself.
 
-- loads `.env` if present
-- regenerates `data/input/pdf/papers_input.json`
-- regenerates `data/input/xml/xml_papers_input.json`
-- runs the selected pipeline from `pipelines/`
+### 2. Prepare paper inputs
 
-## Inputs
+Drop HTML, JATS XML, or PDF files into `data/raw/`, then:
 
-### PDF pipeline
+```bash
+python scripts/prepare_inputs.py --input data/raw --output data/processed/papers.json
+```
 
-Place `.pdf` files in `data/input/pdf/`.
+This produces a JSON array of paper records, each with an extracted section
+tree and a `candidate_passages` field that the LLM will read.
 
-The manifest `data/input/pdf/papers_input.json` is generated automatically by `main.py`.
+### 3. Run the DocETL extraction pipeline
 
-### XML pipeline
+```bash
+python scripts/run_pipeline.py \
+  --input data/processed/papers.json \
+  --output data/predictions/docetl_predictions.jsonl
+```
 
-Place `.xml` files in `data/input/xml/`.
+The pipeline writes raw DocETL output to
+`data/predictions/docetl_predictions.raw.json`, then flattens / URL-builds
+into `docetl_predictions.jsonl`. Cost / token estimates land in
+`outputs/cost_docetl.json`.
 
-The manifest `data/input/xml/xml_papers_input.json` is generated automatically by `main.py`.
+### 4. Evaluate
+
+```bash
+python scripts/evaluate_docetl.py \
+  --predictions data/predictions/docetl_predictions.jsonl \
+  --groundtruth data/benchmark/EXP_groundtruth.csv \
+  --output outputs/metrics_docetl.json
+```
+
+Computes pair-level and repository-aware (triple-level) precision /
+recall / F1, plus per-paper macro averages, coverage, and failure
+categories.
+
+### 5. (Optional) Run DataGatherer baseline
+
+```bash
+pip install git+https://github.com/VIDA-NYU/data-gatherer
+python -c "from src.baselines.run_datagatherer import run_datagatherer; \
+           run_datagatherer('data/processed/papers.json', \
+                            'data/predictions/datagatherer_predictions.jsonl')"
+```
+
+`src/baselines/run_datagatherer.py` probes a few known entry points; if
+your installed version exposes a different API, edit
+`_build_extractor()`. If DataGatherer is unavailable the wrapper writes
+an empty predictions file and the evaluation continues without it.
+
+### 6. End-to-end
+
+```bash
+python scripts/run_all.py --groundtruth data/benchmark/EXP_groundtruth.csv
+```
+
+Each stage is best-effort — missing inputs or failed sub-runs are logged
+and the next stage continues. The final markdown report is written to
+`outputs/report.md`.
+
+## Tests
+
+```bash
+pytest tests/ -q
+```
+
+21 unit tests cover URL construction, identifier and repository
+normalization, paper-key matching, and metric computation.
 
 ## Outputs
 
-Pipeline outputs:
+- `data/predictions/docetl_predictions.jsonl` — one row per dataset reference
+- `outputs/cost_docetl.json` — token/cost estimate for the DocETL run
+- `outputs/metrics_docetl.json` — full metrics + failure categories
+- `outputs/metrics_datagatherer.json` — same, if the baseline ran
+- `outputs/report.md` — narrative comparison
 
-- PDF: `data/output/pdf_results/dataset_references_output.json`
-- XML: `data/output/xml_results/xml_dataset_references_output.json`
+## Known limitations
 
-Intermediate caches:
+- **Cost tracking is approximate.** DocETL reports a total cost via
+  `load_run_save()`; per-paper attribution is estimated from input
+  character counts.
+- **PDF parsing.** Heading detection on PDFs is heuristic. JATS XML or
+  PMC HTML produces much better structure than scanned PDFs.
+- **DataGatherer API drift.** The baseline wrapper probes plausible
+  entry points; for older / forked versions you may need to edit
+  `_build_extractor` or run DataGatherer manually and drop its
+  predictions into `data/predictions/datagatherer_predictions.jsonl`.
+- **URL templates.** `config/repositories.yaml` covers the repositories
+  in the project spec. For others, the URL field is left empty; we never
+  fabricate URLs.
+- **Ground truth column names.** The loader tries common column names
+  (`accession`, `dataset_identifier`, `database`, `repository`, …). If
+  your benchmark CSV uses different headers, edit
+  `src/evaluation/load_groundtruth.py:COLUMN_CANDIDATES`.
 
-- PDF: `intermediate_results/pdf_pipeline/`
-- XML: `intermediate_results/xml_pipeline/`
+## API keys and secrets
 
-## Download Scripts
-
-The downloader utilities are separate from the DocETL runs:
-
-- `scripts/download_papers.py` for general paper download helpers
-- `scripts/download_papers_pdf.py` for browser-mediated PMC PDF downloads
-
-These scripts prepare inputs for the pipelines, but `main.py` is the entrypoint for running DocETL.
-
-## Notes
-
-- The old `--optimize` flag is not part of the current `main.py` interface.
-- The project currently works with the local `docetl_venv` executable.
-- If you see API rate-limit retries, lower `DOCETL_MAX_THREADS`.
+`.env` is read at runtime. Never commit a populated `.env`. The
+`.env.example` file is the only one tracked in version control.
