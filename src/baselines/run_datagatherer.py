@@ -1,18 +1,38 @@
 """Run DataGatherer (https://github.com/VIDA-NYU/data-gatherer) as a baseline.
 
-DataGatherer's public API has shifted over recent releases. We try the most
-common entry points by name; if none work we surface a clear error and a
-manual-fallback hint. The output is normalized to the same prediction schema
-emitted by the DocETL pipeline so the same evaluation code can score both.
+Verified against ``data_gatherer==0.2.1`` (April 2026).
 
-Two strategies are supported when the package exposes them:
-- "full"     — Full-Document Read
-- "retrieve" — Retrieve-Then-Read
+Several gotchas in 0.2.1 that this wrapper papers over:
+
+1. DataGatherer reads its OpenAI key from ``GPT_API_KEY`` (not the canonical
+   ``OPENAI_API_KEY``). We alias both at module load so a project-standard
+   ``.env`` works.
+2. ``DataGatherer.process_articles(...)`` returns ``{preprocessed_url: pd.DataFrame, ...}``
+   by default. We pass ``return_df_joint=True`` to receive a single combined
+   DataFrame (with ``source_url`` as a column) — much easier to group on.
+3. ``save_to_cache=True`` triggers a TypeError inside
+   ``save_func_output_to_cache`` because the caller passes a list where the
+   cache writer expects a dict. We always pass ``save_to_cache=False``.
+4. The per-URL ``process_url`` swallows all exceptions and returns ``None``
+   on failure. We detect "everything failed" by checking the joint DataFrame
+   for emptiness and surface a clear error.
+5. DataGatherer's URL-validation step uses a 0.5 s connect timeout that
+   produces noisy WARNING lines for jPOST / PRIDE / ENA. We bump those
+   loggers to ERROR.
+
+Two strategies are exposed:
+
+- ``strategy="retrieve"`` (default) → ``full_document_read=False``
+  Retrieve-Then-Read: DataGatherer's own section retriever picks
+  candidate passages, then prompts the LLM.
+- ``strategy="full"`` → ``full_document_read=True``
+  Full-Document Read: feed the entire paper to the LLM in one shot.
 """
 from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -27,140 +47,234 @@ class DataGathererUnavailable(RuntimeError):
     pass
 
 
-def _import_datagatherer():
-    """Try a handful of plausible module paths."""
-    for modname in ("data_gatherer", "datagatherer"):
-        try:
-            return importlib.import_module(modname)
-        except Exception:
-            continue
-    raise DataGathererUnavailable(
-        "Could not import data-gatherer. Install with:\n"
-        "  pip install git+https://github.com/VIDA-NYU/data-gatherer\n"
-        "or clone the repo and `pip install -e .` from its root."
-    )
+def _alias_api_keys() -> None:
+    """DataGatherer reads GPT_API_KEY; mirror OPENAI_API_KEY into it.
 
-
-def _build_extractor(strategy: str):
-    """Return a callable extractor(text|path, paper_id) -> list[dict].
-
-    We probe the package surface for known class/function names. If the API
-    has changed, edit this function — the rest of the wrapper is generic.
+    Also load .env at module level so importing this file from a script
+    that hasn't already loaded dotenv still works.
     """
-    pkg = _import_datagatherer()
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(REPO_ROOT / ".env")
+    except Exception:
+        pass
+    if not os.environ.get("GPT_API_KEY") and os.environ.get("OPENAI_API_KEY"):
+        os.environ["GPT_API_KEY"] = os.environ["OPENAI_API_KEY"]
 
-    # Heuristic 1: Pipeline-style entry point
-    for cls_name in ("DataGatherer", "Pipeline", "DataGathererPipeline"):
-        cls = getattr(pkg, cls_name, None)
-        if cls is not None:
-            try:
-                instance = cls(strategy=strategy)  # type: ignore[call-arg]
-            except TypeError:
-                instance = cls()
-            for method in ("extract", "run", "predict", "process_paper"):
-                fn = getattr(instance, method, None)
-                if callable(fn):
-                    return lambda text, paper_id, fn=fn: fn(text, paper_id=paper_id)
 
-    # Heuristic 2: top-level function
-    for fn_name in ("extract_dataset_references", "extract", "run"):
-        fn = getattr(pkg, fn_name, None)
-        if callable(fn):
-            return lambda text, paper_id, fn=fn: fn(text, paper_id=paper_id)
+def _import_datagatherer():
+    try:
+        mod = importlib.import_module("data_gatherer.data_gatherer")
+        return mod.DataGatherer
+    except Exception as e:
+        raise DataGathererUnavailable(
+            "Could not import data-gatherer. Install with:\n"
+            "  pip install git+https://github.com/VIDA-NYU/data-gatherer\n"
+            f"Underlying error: {e}"
+        )
 
-    raise DataGathererUnavailable(
-        "data-gatherer is installed but no recognized entry point was found. "
-        "Edit src/baselines/run_datagatherer.py:_build_extractor to point at "
-        "the correct class/function for your version, or run DataGatherer "
-        "manually and place its predictions at "
-        "data/predictions/datagatherer_predictions.jsonl."
+
+def _pick_url(paper: dict[str, Any]) -> str | None:
+    """Pick the most informative URL we can use for one of our papers."""
+    if paper.get("source_url"):
+        return paper["source_url"]
+    pmcid = paper.get("pmcid")
+    if pmcid:
+        return f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/"
+    doi = paper.get("paper_doi")
+    if doi:
+        return f"https://doi.org/{doi}"
+    return None
+
+
+def _coerce_one_ref(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert one DataGatherer DataFrame row into our internal ref schema."""
+    ds_id = (
+        item.get("dataset_identifier")
+        or item.get("dataset_id")
+        or item.get("identifier")
+        or item.get("id")
+        or ""
     )
+    if not ds_id or str(ds_id).lower() in ("nan", "none", "n/a"):
+        return None
+    repo = (
+        item.get("data_repository")
+        or item.get("repository")
+        or item.get("source")
+        or ""
+    )
+    page = item.get("dataset_webpage") or ""
+    return {
+        "dataset_identifier": str(ds_id),
+        "repository": str(repo) if repo and str(repo).lower() not in ("nan", "none") else "",
+        "evidence": "",
+        "confidence": "",
+        "notes": f"datagatherer; webpage={page}" if page and page != "n/a" else "",
+    }
 
 
-def _coerce_refs(raw: Any) -> list[dict[str, Any]]:
-    """Normalize whatever DataGatherer returns into our list-of-dicts schema."""
-    if raw is None:
-        return []
-    if isinstance(raw, dict):
-        # If it looks like {"dataset_references": [...]}, unwrap.
-        for key in ("dataset_references", "datasets", "references", "results"):
-            if key in raw and isinstance(raw[key], list):
-                raw = raw[key]
-                break
-        else:
-            return []
-    if not isinstance(raw, list):
-        return []
+def _df_to_records(df: Any, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Group a DataGatherer joint DataFrame by paper URL.
+
+    The DataFrame returned with ``return_df_joint=True`` carries one row per
+    extracted dataset reference, plus a ``source_url`` column we can group
+    on. Anything else (e.g. ``pub_title``) is ignored.
+    """
+    try:
+        import pandas as pd
+    except Exception:  # pragma: no cover
+        pd = None  # type: ignore[assignment]
+
+    by_url: dict[str, list[dict[str, Any]]] = {}
+    if pd is not None and isinstance(df, pd.DataFrame) and len(df) > 0:
+        url_col = next(
+            (c for c in ("source_url", "paper_url", "publication_url", "url")
+             if c in df.columns),
+            None,
+        )
+        if url_col is None:
+            url_col = next((c for c in df.columns if "url" in c.lower()), None)
+        for _, row in df.iterrows():
+            url = (row.get(url_col) if url_col else "") or ""
+            ref = _coerce_one_ref(row.to_dict())
+            if ref is not None:
+                by_url.setdefault(str(url), []).append(ref)
+
     out: list[dict[str, Any]] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            continue
-        out.append({
-            "dataset_identifier": (
-                item.get("dataset_identifier")
-                or item.get("accession")
-                or item.get("identifier")
-                or item.get("id")
-                or ""
-            ),
-            "repository": (
-                item.get("repository")
-                or item.get("database")
-                or item.get("source")
-                or ""
-            ),
-            "evidence": item.get("evidence") or item.get("context") or "",
-            "confidence": str(item.get("confidence") or ""),
-            "notes": item.get("notes") or "",
-        })
+    for paper in papers:
+        url = _pick_url(paper) or ""
+        refs = by_url.get(url, [])
+        out.append({**paper, "dataset_references": refs})
     return out
 
 
 def run_datagatherer(
     input_path: Path,
     output_path: Path,
-    strategy: str = "full",
+    strategy: str = "retrieve",
+    llm_name: str | None = None,
 ) -> dict[str, Any]:
-    """Run DataGatherer over a DocETL-style JSON input file.
+    """Run DataGatherer over our DocETL-style paper records.
 
-    Falls back gracefully — if DataGatherer isn't usable on this machine, we
-    write an empty predictions file and a status note rather than crashing.
+    Args:
+        input_path: papers.json from scripts/prepare_inputs.py or fetch_urls.py.
+        output_path: predictions JSONL path; same schema as DocETL's output.
+        strategy: ``"retrieve"`` (Retrieve-Then-Read) or ``"full"`` (Full-Document Read).
+        llm_name: LiteLLM-compatible model. Defaults to DOCETL_MODEL or ``gpt-4o-mini``.
     """
+    _alias_api_keys()
+
     input_path = Path(input_path)
     output_path = Path(output_path)
     papers = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(papers, list):
         raise ValueError("Expected a JSON array of papers")
 
-    status = {"status": "ok", "strategy": strategy, "n_papers": len(papers)}
-    rows: list[dict[str, Any]] = []
-    start = time.time()
+    status: dict[str, Any] = {
+        "tool": "datagatherer",
+        "strategy": strategy,
+        "n_papers": len(papers),
+    }
 
-    try:
-        extractor = _build_extractor(strategy)
-    except DataGathererUnavailable as e:
-        status["status"] = "unavailable"
-        status["error"] = str(e)
-        # Write empty predictions so evaluation still runs.
+    if not os.environ.get("GPT_API_KEY") and not os.environ.get("OPENAI_API_KEY"):
+        status["status"] = "no_api_key"
+        status["error"] = (
+            "Neither OPENAI_API_KEY nor GPT_API_KEY is set in the environment. "
+            "Set OPENAI_API_KEY in .env (this wrapper aliases it to GPT_API_KEY)."
+        )
         write_predictions([], output_path)
         return status
 
-    for paper in papers:
-        text = paper.get("full_text") or paper.get("candidate_passages") or ""
-        try:
-            raw = extractor(text, paper.get("paper_id", ""))
-        except Exception as e:
-            print(f"[WARN] DataGatherer failed on {paper.get('paper_id', '?')}: {e}")
-            raw = []
-        refs = _coerce_refs(raw)
-        rows.append({**paper, "dataset_references": refs})
+    try:
+        DataGatherer = _import_datagatherer()
+    except DataGathererUnavailable as e:
+        status["status"] = "unavailable"
+        status["error"] = str(e)
+        write_predictions([], output_path)
+        return status
 
-    flat = flatten_docetl_output(rows)
+    full_document_read = strategy == "full"
+    model = llm_name or os.environ.get("DOCETL_MODEL") or "gpt-4o-mini"
+
+    # Build URL list, drop papers we can't address.
+    url_list: list[str] = []
+    paper_for_url: list[dict[str, Any]] = []
+    for paper in papers:
+        url = _pick_url(paper)
+        if url:
+            url_list.append(url)
+            paper_for_url.append(paper)
+    if not url_list:
+        status["status"] = "no_urls"
+        status["error"] = "No paper has a usable URL (source_url / pmcid / doi)."
+        write_predictions([], output_path)
+        return status
+
+    # Quiet noisy URL-validation warnings (0.5 s connect timeout to jPOST etc.)
+    for noisy in ("base_parser", "data_fetcher"):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
+    # Keep the data_gatherer logger at ERROR so per-URL failures still surface.
+    logging.getLogger("data_gatherer").setLevel(logging.ERROR)
+
+    print(f"DataGatherer: model={model}  strategy={strategy}  n_urls={len(url_list)}")
+    start = time.time()
+    try:
+        dg = DataGatherer(
+            llm_name=model,
+            process_entire_document=full_document_read,
+            log_level=40,
+            save_to_cache=False,   # workaround for the 0.2.1 cache TypeError bug
+            load_from_cache=False,
+        )
+        # return_df_joint=True gives us a single combined DataFrame instead of
+        # the default {url: per-url DataFrame, ...} dict. Easier to handle.
+        df = dg.process_articles(
+            url_list=url_list,
+            full_document_read=full_document_read,
+            headless=True,
+            use_portkey=False,
+            return_df_joint=True,
+        )
+    except ValueError as e:
+        # process_articles raises "All objects passed were None" when *every*
+        # URL crashed inside process_url. That's the canonical "complete
+        # failure" signal we want to surface.
+        status["status"] = "all_urls_failed"
+        status["error"] = (
+            f"DataGatherer failed on every URL. Underlying message: {e}. "
+            "Check stderr above for the per-URL traceback (commonly: invalid "
+            "API key, model name, or network access to NCBI E-utilities)."
+        )
+        status["elapsed_sec"] = round(time.time() - start, 1)
+        write_predictions([], output_path)
+        return status
+    except Exception as e:
+        status["status"] = "error"
+        status["error"] = f"{type(e).__name__}: {e}"
+        status["elapsed_sec"] = round(time.time() - start, 1)
+        write_predictions([], output_path)
+        return status
+
+    # Sanity check: empty DataFrame means DataGatherer ran but extracted
+    # nothing — usually a model/parser issue, not a code issue. Let the user
+    # see the row count so they don't guess.
+    raw_rows = int(len(df)) if df is not None and hasattr(df, "__len__") else 0
+    grouped = _df_to_records(df, paper_for_url)
+    flat = flatten_docetl_output(grouped)
     write_predictions(flat, output_path)
 
     status.update({
-        "elapsed_sec": round(time.time() - start, 2),
+        "status": "ok" if flat else "no_predictions",
+        "elapsed_sec": round(time.time() - start, 1),
         "n_predictions": len(flat),
         "predictions_path": str(output_path),
+        "raw_df_rows": raw_rows,
     })
+    if not flat:
+        status["error"] = (
+            "DataGatherer returned a DataFrame with no usable rows. Common "
+            "causes: model error suppressed inside process_url (rerun with "
+            "log_level=20 to see), or every paper genuinely had no datasets."
+        )
     return status

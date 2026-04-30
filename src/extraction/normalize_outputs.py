@@ -62,13 +62,19 @@ def flatten_docetl_output(records: Iterable[dict[str, Any]]) -> list[dict[str, A
                 "notes": "no dataset references found",
             })
             continue
+        seen_ids: set[str] = set()
         for ref in refs:
             if not isinstance(ref, dict):
                 continue
             normalized = normalize_record(paper, ref)
-            if not normalized["dataset_identifier"]:
+            ds_id = normalized["dataset_identifier"]
+            if not ds_id:
                 # Skip empty identifiers from the LLM
                 continue
+            if ds_id in seen_ids:
+                # Drop within-paper duplicates the LLM emitted twice
+                continue
+            seen_ids.add(ds_id)
             out.append(normalized)
     return out
 
