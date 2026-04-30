@@ -1,0 +1,22 @@
+paths:
+  raw_dir: data/raw
+  processed_dir: data/processed
+  benchmark_dir: data/benchmark
+  predictions_dir: data/predictions
+  outputs_dir: outputs
+
+docetl:
+  default_model: gpt-4o-mini
+  pipeline_yaml: pipelines/dataset_reference_extraction.yaml
+  intermediate_dir: data/processed/.docetl_cache
+
+evaluation:
+  paper_id_keys: [pmcid, pmid, doi, paper_id]
+  benchmark_files:
+    exp: data/benchmark/EXP_groundtruth.csv
+    rev: data/benchmark/REV_groundtruth.csv
+
+cost:
+  approx_input_tokens_per_char: 0.25
+  default_input_price_per_1k: 0.00015
+  default_output_price_per_1k: 0.0006
