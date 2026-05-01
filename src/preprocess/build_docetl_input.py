@@ -6,6 +6,10 @@ references appear (data availability, methods, code availability,
 supplementary, figure captions, plus any paragraph that mentions a known
 repository or accession-like token). This keeps the LLM prompt focused
 without requiring the model to ingest the entire paper.
+
+The accession / repository regexes are derived from config/repositories.yaml
+via src.extraction.registry — adding a repository to the registry
+automatically extends what counts as a "relevant" passage.
 """
 from __future__ import annotations
 
@@ -14,34 +18,24 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..extraction.registry import accession_pattern, repository_pattern
 from .parse_html import parse_html_file
 from .parse_pdf import parse_pdf_file
 
 CANDIDATE_HEADING_RE = re.compile(
     r"(data\s+availability|availability\s+of\s+data|code\s+availability|"
     r"supplement|materials?\s+and\s+methods|methods?|results?|"
-    r"experimental\s+procedures)",
+    r"experimental\s+procedures|deposit|accession)",
     re.IGNORECASE,
 )
 
-# Strong identifier prefixes — presence signals a candidate passage
-ACCESSION_RE = re.compile(
-    r"\b(?:GSE|GSM|GPL|GDS|PXD|MSV|JPST|IPX|PASS|E-MTAB|E-GEOD|E-PROT|E-MEXP|"
-    r"SRP|SRR|SRX|SRA|PRJNA|PRJEB|PRJDB|SAMN|SAMEA|SAMD|ERP|ERR|ERX|ERS)\d+\b"
-)
-REPO_NAME_RE = re.compile(
-    r"\b(GEO|Gene Expression Omnibus|PRIDE|ProteomeXchange|MassIVE|jPOST|"
-    r"iProX|PeptideAtlas|Panorama Public|ArrayExpress|SRA|BioProject|BioSample|"
-    r"ENA|Dryad|Zenodo|Figshare|Dataverse|Mendeley Data|GenBank|UniProt)\b",
-    re.IGNORECASE,
-)
 DOI_INLINE_RE = re.compile(r"\b10\.\d{4,9}/[\w\.\-/:;()]+", re.IGNORECASE)
 
 
 def _looks_relevant(text: str) -> bool:
-    if ACCESSION_RE.search(text):
+    if accession_pattern().search(text):
         return True
-    if REPO_NAME_RE.search(text):
+    if repository_pattern().search(text):
         return True
     if "doi.org" in text.lower():
         return True
@@ -50,8 +44,38 @@ def _looks_relevant(text: str) -> bool:
     return False
 
 
+def _empty_passage_fallback(paper: dict[str, Any], max_chars: int) -> str:
+    """Last-resort context when no section heading or paragraph triggers.
+
+    Includes the abstract plus the tail of the full text (data-availability
+    statements typically appear near the end of a paper) so the LLM has
+    *some* grounded text instead of being asked to reason from the prompt
+    examples alone — which is the documented cause of the worst
+    hallucinations on under-parsed papers.
+    """
+    parts: list[str] = []
+    abstract = (paper.get("abstract") or "").strip()
+    if abstract:
+        parts.append("### Abstract\n" + abstract)
+    full_text = (paper.get("full_text") or "").strip()
+    if full_text:
+        tail_budget = max(0, max_chars - sum(len(p) for p in parts) - 200)
+        if tail_budget > 0:
+            tail = full_text[-tail_budget:]
+            parts.append("### [fallback: tail of paper body]\n" + tail)
+    return "\n\n".join(parts)
+
+
 def select_candidate_passages(paper: dict[str, Any], max_chars: int = 24_000) -> str:
-    """Select passages most likely to contain dataset references."""
+    """Select passages most likely to contain dataset references.
+
+    Priority order (so the prompt budget goes to the highest-signal text):
+      1. Paragraphs that contain an accession or repository name.
+      2. Sections whose title looks like a data-availability / methods /
+         supplementary heading (these often hold the statement even when
+         no token-level signal is present).
+      3. Abstract, if it carries a DOI or accession.
+    """
     chunks: list[str] = []
     seen: set[str] = set()
 
@@ -65,28 +89,35 @@ def select_candidate_passages(paper: dict[str, Any], max_chars: int = 24_000) ->
         seen.add(sig)
         chunks.append(f"### {label}\n{text}")
 
-    # Always include relevant-sounding sections by title
+    # 1. Paragraph-level signal first — this is the most likely place to find
+    #    a real accession and we want it included even when budgets are tight.
+    for s in paper.get("sections", []):
+        body = s.get("section_text", "") or ""
+        if not body:
+            continue
+        for para in re.split(r"\n{2,}", body):
+            if _looks_relevant(para):
+                add(s.get("section_title", "") or "(paragraph)", para)
+
+    # 2. Sections matched by heading (full body) — provides surrounding
+    #    context for paragraphs already added and catches statements
+    #    written without accession-like tokens.
     for s in paper.get("sections", []):
         title = s.get("section_title", "") or ""
         body = s.get("section_text", "") or ""
         if CANDIDATE_HEADING_RE.search(title):
             add(title or "(section)", body)
 
-    # Plus any section/paragraph containing accession-like or repo strings
-    for s in paper.get("sections", []):
-        body = s.get("section_text", "") or ""
-        if not body:
-            continue
-        # Split into paragraphs to keep the prompt tight
-        for para in re.split(r"\n{2,}", body):
-            if _looks_relevant(para):
-                add(s.get("section_title", "") or "(paragraph)", para)
-
-    # Abstract sometimes carries DOIs / accessions
+    # 3. Abstract sometimes carries DOIs / accessions.
     if _looks_relevant(paper.get("abstract", "")):
         add("Abstract", paper["abstract"])
 
     text = "\n\n".join(chunks)
+    if not text.strip():
+        # Heading- and accession-based selection produced nothing — fall back
+        # to abstract + tail of body so the LLM still has grounded context
+        # rather than being primed to invent identifiers from the prompt.
+        text = _empty_passage_fallback(paper, max_chars)
     if len(text) > max_chars:
         text = text[:max_chars] + "\n\n[... truncated for prompt budget ...]"
     return text

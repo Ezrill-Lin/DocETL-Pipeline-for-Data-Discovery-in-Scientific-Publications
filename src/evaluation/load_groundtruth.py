@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from ..extraction.registry import NA_IDENTIFIER, is_na_identifier
 from ..extraction.url_builder import normalize_identifier, normalize_repository
 
 # Per-field, ordered list of column-name candidates we accept.
@@ -108,13 +109,29 @@ def normalize_groundtruth_row(row: dict[str, Any]) -> dict[str, Any]:
             if m:
                 doi = _normalize_doi(m.group(1))
     paper_id = _pick(row, COLUMN_CANDIDATES["paper_id"]) or pmcid or pmid or doi or paper_url
+
+    raw_id = _pick(row, COLUMN_CANDIDATES["dataset_identifier"])
+    raw_repo = _pick(row, COLUMN_CANDIDATES["repository"])
+    # Collapse "", "N/A", "n/a", "NA", "none" → uniform sentinel "N/A". This
+    # preserves rows where the benchmark recorded "this paper has no
+    # extractable identifier" so they can match a system that emits N/A
+    # instead of being silently dropped.
+    if is_na_identifier(raw_id):
+        ds_id = NA_IDENTIFIER
+    else:
+        ds_id = normalize_identifier(raw_id)
+    if is_na_identifier(raw_repo):
+        repo = NA_IDENTIFIER
+    else:
+        repo = normalize_repository(raw_repo) or raw_repo.strip()
+
     return {
         "paper_id": paper_id,
         "pmcid": pmcid,
         "pmid": pmid,
         "paper_doi": doi,
-        "dataset_identifier": normalize_identifier(_pick(row, COLUMN_CANDIDATES["dataset_identifier"])),
-        "repository": normalize_repository(_pick(row, COLUMN_CANDIDATES["repository"])),
+        "dataset_identifier": ds_id,
+        "repository": repo,
         "url": _pick(row, COLUMN_CANDIDATES["url"]),
     }
 
@@ -124,6 +141,9 @@ def load_groundtruth(path: Path) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for r in rows:
         norm = normalize_groundtruth_row(r)
+        # Keep N/A rows; only skip rows with no usable identifier slot at all
+        # (which shouldn't happen post-normalization but guards against
+        # entirely empty CSV rows).
         if norm["dataset_identifier"]:
             out.append(norm)
     return out

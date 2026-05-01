@@ -1,5 +1,22 @@
-# Repository definitions: prefix patterns, canonical name, and URL templates.
-# The {id} placeholder is replaced with the normalized identifier.
+# Repository definitions: prefix patterns, canonical name, identifier schema,
+# synonym group (for match-time equivalence), and URL templates.
+#
+# Field reference:
+#   canonical          — repository name we emit downstream
+#   aliases            — strings recognized as referring to this repository
+#   prefixes           — accession prefixes that imply this repository
+#   identifier_pattern — anchored regex an identifier MUST match to be valid
+#                        (omit/leave blank to disable schema validation)
+#   synonym_group      — repos sharing this group are treated as equivalent at
+#                        triple-match time (e.g. PRIDE/ProteomeXchange both =
+#                        "proteomexchange"). Defaults to lowercased canonical.
+#   url_template       — {id} is replaced with the normalized identifier
+#
+# Adding a new repository here propagates automatically to:
+#   - The candidate-passage filter in build_docetl_input.py
+#   - The prefix list rendered into the LLM prompt
+#   - URL construction in url_builder.py
+#   - Repository synonym handling in match_records.py
 
 repositories:
   - canonical: GEO
@@ -10,11 +27,15 @@ repositories:
       - www.ncbi.nlm.nih.gov/geo
       - ncbi.nlm.nih.gov/geo
     prefixes: [GSE, GSM, GPL]
+    identifier_pattern: "^(GSE|GSM|GPL)\\d+$"
+    synonym_group: geo
     url_template: "https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc={id}"
 
   - canonical: GEO
     aliases: []
     prefixes: [GDS]
+    identifier_pattern: "^GDS\\d+$"
+    synonym_group: geo
     url_template: "https://www.ncbi.nlm.nih.gov/sites/GDSbrowser?acc={id}"
 
   - canonical: PRIDE
@@ -27,6 +48,8 @@ repositories:
       - www.ebi.ac.uk/pride
       - ebi.ac.uk/pride
     prefixes: [PXD]
+    identifier_pattern: "^PXD\\d+$"
+    synonym_group: proteomexchange
     url_template: "https://www.ebi.ac.uk/pride/archive/projects/{id}"
 
   - canonical: ProteomeXchange
@@ -35,6 +58,8 @@ repositories:
       - ProteomeCentral
       - PX
     prefixes: []
+    identifier_pattern: "^PXD\\d+$"
+    synonym_group: proteomexchange
     url_template: "https://proteomecentral.proteomexchange.org/cgi/GetDataset?ID={id}"
 
   - canonical: MassIVE
@@ -45,6 +70,8 @@ repositories:
       - massive.ucsd.edu
       - www.massive.ucsd.edu
     prefixes: [MSV]
+    identifier_pattern: "^MSV\\d+$"
+    synonym_group: massive
     url_template: "https://massive.ucsd.edu/ProteoSAFe/dataset.jsp?accession={id}"
 
   - canonical: jPOST
@@ -55,6 +82,8 @@ repositories:
       - repository.jpostdb.org
       - www.jpostdb.org
     prefixes: [JPST]
+    identifier_pattern: "^JPST\\d+$"
+    synonym_group: jpost
     url_template: "https://repository.jpostdb.org/entry/{id}"
 
   - canonical: iProX
@@ -65,6 +94,8 @@ repositories:
       - www.iprox.org
       - iprox.org
     prefixes: [IPX]
+    identifier_pattern: "^IPX\\d+$"
+    synonym_group: iprox
     url_template: "https://www.iprox.cn/page/project.html?id={id}"
 
   - canonical: PeptideAtlas
@@ -72,6 +103,8 @@ repositories:
       - PeptideAtlas
       - PASS
     prefixes: [PASS]
+    identifier_pattern: "^PASS\\d+$"
+    synonym_group: peptideatlas
     url_template: "https://www.peptideatlas.org/PASS/{id}"
 
   - canonical: PanoramaPublic
@@ -80,6 +113,8 @@ repositories:
       - PanoramaPublic
       - Panorama
     prefixes: []
+    identifier_pattern: ""
+    synonym_group: panoramapublic
     url_template: ""
 
   - canonical: ArrayExpress
@@ -88,6 +123,8 @@ repositories:
       - EBI ArrayExpress
       - BioStudies ArrayExpress
     prefixes: ["E-MTAB", "E-GEOD", "E-PROT", "E-MEXP"]
+    identifier_pattern: "^E-(MTAB|GEOD|PROT|MEXP)-\\d+$"
+    synonym_group: arrayexpress
     url_template: "https://www.ebi.ac.uk/biostudies/arrayexpress/studies/{id}"
 
   - canonical: SRA
@@ -98,6 +135,8 @@ repositories:
       - www.ncbi.nlm.nih.gov/sra
       - ncbi.nlm.nih.gov/sra
     prefixes: [SRP, SRR, SRX, SRS, SRA]
+    identifier_pattern: "^SR[PRXSA]\\d+$"
+    synonym_group: ncbi-sra
     url_template: "https://www.ncbi.nlm.nih.gov/sra/?term={id}"
 
   - canonical: BioProject
@@ -107,6 +146,8 @@ repositories:
       - www.ncbi.nlm.nih.gov/bioproject
       - ncbi.nlm.nih.gov/bioproject
     prefixes: [PRJNA, PRJEB, PRJDB]
+    identifier_pattern: "^PRJ(NA|EB|DB)\\d+$"
+    synonym_group: ncbi-sra
     url_template: "https://www.ncbi.nlm.nih.gov/bioproject/{id}"
 
   - canonical: BioSample
@@ -114,6 +155,8 @@ repositories:
       - BioSample
       - NCBI BioSample
     prefixes: [SAMN, SAMEA, SAMD]
+    identifier_pattern: "^SAM(N|EA|D)\\d+$"
+    synonym_group: biosample
     url_template: "https://www.ncbi.nlm.nih.gov/biosample/{id}"
 
   - canonical: ENA
@@ -121,6 +164,8 @@ repositories:
       - ENA
       - European Nucleotide Archive
     prefixes: [ERP, ERR, ERX, ERS]
+    identifier_pattern: "^ER[PRXS]\\d+$"
+    synonym_group: ena
     url_template: "https://www.ebi.ac.uk/ena/browser/view/{id}"
 
   - canonical: Dryad
@@ -128,12 +173,16 @@ repositories:
       - Dryad
       - Dryad Digital Repository
     prefixes: []
+    identifier_pattern: "^10\\.\\d{4,9}/.+$"
+    synonym_group: dryad
     url_template: "https://doi.org/{id}"
 
   - canonical: Zenodo
     aliases:
       - Zenodo
     prefixes: []
+    identifier_pattern: "^10\\.\\d{4,9}/.+$"
+    synonym_group: zenodo
     url_template: "https://doi.org/{id}"
 
   - canonical: Figshare
@@ -141,6 +190,8 @@ repositories:
       - Figshare
       - figshare
     prefixes: []
+    identifier_pattern: "^10\\.\\d{4,9}/.+$"
+    synonym_group: figshare
     url_template: "https://doi.org/{id}"
 
   - canonical: Dataverse
@@ -148,13 +199,18 @@ repositories:
       - Dataverse
       - Harvard Dataverse
     prefixes: []
+    identifier_pattern: "^10\\.\\d{4,9}/.+$"
+    synonym_group: dataverse
     url_template: "https://doi.org/{id}"
 
   - canonical: MendeleyData
     aliases:
       - Mendeley Data
       - MendeleyData
-    prefixes: []
+      - data.mendeley.com
+    prefixes: ["10.17632"]
+    identifier_pattern: "^10\\.17632/.+$"
+    synonym_group: mendeleydata
     url_template: "https://doi.org/{id}"
 
   - canonical: dbGaP
@@ -167,6 +223,8 @@ repositories:
       - www.ncbi.nlm.nih.gov/projects/gap
       - ncbi.nlm.nih.gov/projects/gap
     prefixes: [phs]
+    identifier_pattern: "^phs\\d+(\\.v\\d+)?(\\.p\\d+)?$"
+    synonym_group: dbgap
     url_template: "https://www.ncbi.nlm.nih.gov/projects/gap/cgi-bin/study.cgi?study_id={id}"
 
   - canonical: PDB
@@ -179,6 +237,8 @@ repositories:
       - rcsb.org
       - www.wwpdb.org
     prefixes: []
+    identifier_pattern: "^[0-9][A-Za-z0-9]{3}$"
+    synonym_group: pdb
     url_template: "https://www.rcsb.org/structure/{id}"
 
   - canonical: EGA
@@ -189,6 +249,8 @@ repositories:
       - ega-archive.org
       - www.ega-archive.org
     prefixes: [EGAS, EGAD]
+    identifier_pattern: "^EGA[SD]\\d+$"
+    synonym_group: ega
     url_template: "https://ega-archive.org/studies/{id}"
 
   - canonical: DepMap
@@ -197,6 +259,8 @@ repositories:
       - Dependency Map
       - Cancer Dependency Map
     prefixes: []
+    identifier_pattern: ""
+    synonym_group: depmap
     url_template: "https://depmap.org/portal/download/all/?releasename={id}"
 
   - canonical: PDC
@@ -205,6 +269,8 @@ repositories:
       - Proteomic Data Commons
       - Proteomic Data Commons (PDC)
     prefixes: [PDC]
+    identifier_pattern: "^PDC\\d+$"
+    synonym_group: pdc
     url_template: "https://pdc.cancer.gov/pdc/study/{id}"
 
   - canonical: HumanProteinAtlas
@@ -212,10 +278,14 @@ repositories:
       - Human Protein Atlas
       - HPA
     prefixes: []
+    identifier_pattern: ""
+    synonym_group: hpa
     url_template: "https://www.proteinatlas.org/{id}"
 
   - canonical: DOI
     aliases:
       - DOI
     prefixes: []
+    identifier_pattern: "^10\\.\\d{4,9}/.+$"
+    synonym_group: doi
     url_template: "https://doi.org/{id}"

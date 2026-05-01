@@ -82,8 +82,26 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
     sections: list[dict[str, Any]] = []
     body = soup.find("body")
     back = soup.find("back")
-    if not body and not back:
+    front = soup.find("front")
+    if not body and not back and not front:
         return sections
+
+    # Some PMC papers (esp. older NIHMS-imported PLOS articles) put the
+    # data-availability statement in <front><notes>. Capture those before
+    # walking the body so the LLM never misses them to a content-budget cut.
+    if front:
+        for idx, note in enumerate(front.find_all("notes"), start=1):
+            note_type = (note.get("notes-type") or "").strip()
+            title_tag = note.find("title")
+            title = _text(title_tag) if title_tag else (note_type or "Notes")
+            text = "\n".join(_text(p) for p in note.find_all("p")) or _text(note)
+            if text:
+                sections.append({
+                    "section_title": title,
+                    "section_text": text,
+                    "section_path": f"front/notes[{idx}]",
+                    "page": None,
+                })
 
     def walk(sec: Tag, path_parts: list[str]) -> None:
         title_tag = sec.find("title", recursive=False)
@@ -128,6 +146,7 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
     # PMC JATS often files data-availability statements under
     # <back><notes notes-type="data-availability"> rather than as a body
     # <sec>. Harvest those plus any other notes/sec inside <back>.
+    # Footnotes (<fn>) frequently carry the accession in older NIHMS papers.
     if back:
         for idx, note in enumerate(back.find_all("notes"), start=1):
             note_type = (note.get("notes-type") or "").strip()
@@ -143,6 +162,15 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
                 })
         for idx, sec in enumerate(back.find_all("sec", recursive=False), start=1):
             walk(sec, [f"back/sec[{idx}]"])
+        for idx, fn in enumerate(back.find_all("fn"), start=1):
+            text = _text(fn)
+            if text:
+                sections.append({
+                    "section_title": "[footnote]",
+                    "section_text": text,
+                    "section_path": f"back/fn[{idx}]",
+                    "page": None,
+                })
 
     return sections
 
