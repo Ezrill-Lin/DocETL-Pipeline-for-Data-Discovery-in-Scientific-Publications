@@ -5,6 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.12"
 dependencies = [
     "beautifulsoup4>=4.12",
+    "data-gatherer",
     "docetl>=0.2.6",
     "lxml>=4.9",
     "pandas>=2.0",
@@ -20,3 +21,6 @@ dependencies = [
     "tiktoken>=0.5",
     "tqdm>=4.66",
 ]
+
+[tool.uv.sources]
+data-gatherer = { git = "https://github.com/VIDA-NYU/data-gatherer" }
