@@ -1,313 +1,157 @@
-# DocETL Pipeline for Extracting Dataset References from Scientific Papers (XML Format)
-# This pipeline uses DocETL's decomposition approach to process papers section-by-section
-# following a more sophisticated RTR (Reduce-Then-Retrieve) pattern
+# DocETL FDR (Full-Document Read) pipeline for dataset reference extraction.
+#
+# Pipeline overview
+# -----------------
+# Stage 1 (LLM map): For each paper, read the full extracted document text
+#   and emit a list of dataset references (identifier + repository + evidence
+#   + confidence). The LLM does NOT invent URLs — that is done in deterministic
+#   Python after this pipeline runs.
+# Stage 2 (deterministic, post-pipeline): src/extraction/normalize_outputs.py
+#   normalizes identifiers and repositories and constructs URLs.
+#
+# Inputs:
+#   data/processed/papers.json — JSON array of paper records produced by
+#   src/preprocess/build_docetl_input.build_json_array. Each record contains
+#   a `full_text` field with the entire cleaned document text.
+#
+# Output schema is identical to dataset_reference_extraction.yaml (RTR) so
+# that the same normalize_outputs.py and evaluate_docetl.py work unchanged.
+#
+# Notes:
+# - Path placeholders ({{INPUT_PATH}}, {{OUTPUT_PATH}}, {{INTERMEDIATE_DIR}},
+#   {{MODEL}}) are substituted by scripts/run_pipeline.py at runtime so the
+#   YAML stays portable.
+# - FDR differs from RTR only in what text the LLM receives: full_text
+#   (entire document) vs candidate_passages (pre-filtered passages).
 
-parsing_tools:
-  - name: xml_section_parser
-    function_code: |
-      def xml_section_parser(document: Dict) -> List[Dict]:
-          """
-          Parse XML to extract structured sections instead of flattening to text.
-          Preserves section titles, types, and hierarchy for better downstream processing.
-          """
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-          import re
-          
-          xml_path = document["xml_path"]
-          
-          # Check if file exists
-          if not Path(xml_path).exists():
-              return [{"sections": [{"title": "ERROR", "type": "error", "content": f"File not found: {xml_path}"}]}]
-          
-          try:
-              # Parse XML
-              tree = ET.parse(xml_path)
-              root = tree.getroot()
-              
-              sections = []
-              
-              # Helper function to extract text from XML element
-              def get_text(element):
-                  if element is None:
-                      return ""
-                  text = "".join(element.itertext())
-                  return re.sub(r'\s+', ' ', text).strip()
-              
-              # Extract article metadata
-              article_meta = root.find('.//article-meta')
-              if article_meta:
-                  # Add title as first section
-                  title_elem = article_meta.find('.//article-title')
-                  if title_elem is not None:
-                      sections.append({
-                          "title": "Title",
-                          "type": "front",
-                          "content": get_text(title_elem)
-                      })
-                  
-                  # Extract abstract
-                  abstract = article_meta.find('.//abstract')
-                  if abstract is not None:
-                      sections.append({
-                          "title": "Abstract",
-                          "type": "front",
-                          "content": get_text(abstract)
-                      })
-              
-              # Extract body sections
-              body = root.find('.//body')
-              if body is not None:
-                  for sec in body.findall('.//sec'):
-                      title_elem = sec.find('title')
-                      sec_title = get_text(title_elem) if title_elem is not None else "Unnamed Section"
-                      
-                      # Get section content (excluding nested sections' titles)
-                      content_parts = []
-                      for elem in sec:
-                          if elem.tag != 'sec':  # Skip nested sections
-                              content_parts.append(get_text(elem))
-                      
-                      sections.append({
-                          "title": sec_title,
-                          "type": "body",
-                          "content": " ".join(content_parts)
-                      })
-              
-              # Extract back matter (includes data availability, acknowledgements, etc.)
-              back = root.find('.//back')
-              if back is not None:
-                  # Data availability statements
-                  for sec in back.findall('.//sec'):
-                      title_elem = sec.find('title')
-                      sec_title = get_text(title_elem) if title_elem is not None else "Back Matter"
-                      sections.append({
-                          "title": sec_title,
-                          "type": "back",
-                          "content": get_text(sec)
-                      })
-                  
-                  # Acknowledgements
-                  ack = back.find('.//ack')
-                  if ack is not None:
-                      sections.append({
-                          "title": "Acknowledgements",
-                          "type": "back",
-                          "content": get_text(ack)
-                      })
-                  
-                  # Notes
-                  for note in back.findall('.//fn-group'):
-                      sections.append({
-                          "title": "Notes",
-                          "type": "back",
-                          "content": get_text(note)
-                      })
-              
-              # References (usually less useful for dataset extraction)
-              ref_list = root.find('.//ref-list')
-              if ref_list is not None:
-                  sections.append({
-                      "title": "References",
-                      "type": "references",
-                      "content": get_text(ref_list)[:5000]  # Truncate references
-                  })
-              
-              return [{"sections": sections}]
-              
-          except Exception as e:
-              return [{"sections": [{"title": "ERROR", "type": "error", "content": f"Failed to parse {xml_path}: {str(e)}"}]}]
+default_model: "{{MODEL}}"
+
+# Self-imposed rate limits so DocETL backs off rather than hitting OpenAI's
+# hard limits. Tune count values to match your API tier:
+#   gpt-4o-mini Tier 1 : 200 000 TPM / 500 RPM
+#   gpt-4o-mini Tier 2 : 2 000 000 TPM / 5 000 RPM
+rate_limits:
+  llm_call:
+    - count: 450
+      per: 1
+      unit: MINUTE
+  llm_tokens:
+    - count: 180000
+      per: 1
+      unit: MINUTE
 
 datasets:
-  scientific_papers:
+  papers:
     type: file
-    source: local
-    path: "../data/input/xml/xml_papers_input.json"
-    parsing:
-      - function: xml_section_parser
-
-default_model: gpt-4o-mini
-
-system_prompt:
-  dataset_description: "A collection of scientific research papers in XML format, processed section-by-section"
-  persona: "A research data specialist analyzing scientific publications to identify and catalog dataset usage"
+    path: "{{INPUT_PATH}}"
 
 operations:
-  # Step 1: Split papers into individual sections (decomposition)
-  # This is DocETL's key strength - breaking documents into manageable chunks
-  - name: split_into_sections
-    type: unnest
-    unnest_key: sections
-    keep_empty: false
-
-  # Step 2: Filter for sections likely to contain dataset references
-  # This implements the "Reduce" part of RTR (Reduce-Then-Retrieve)
-  - name: filter_relevant_sections
-    type: filter
-    prompt: |
-      Section Title: {{ input.sections.title }}
-      Section Type: {{ input.sections.type }}
-      
-      First 200 characters of content: {{ input.sections.content[:200] }}...
-      
-      Is this section likely to contain dataset references or data availability information?
-      
-      Look for sections about:
-      - Methods or Materials and Methods
-      - Data Availability
-      - Data Sharing
-      - Datasets or Data Sources
-      - Supplementary Information
-      - Acknowledgements (sometimes contains dataset info)
-      - Results (may mention specific datasets)
-      
-      Exclude:
-      - References/Bibliography (unless explicitly a data citation section)
-      - Pure introduction/background sections
-      - Abstract (unless paper is specifically about a dataset)
-      
-      Return true if this section is likely relevant for dataset extraction.
-    output:
-      schema:
-        is_relevant: bool
-
-  # Step 3: Extract dataset references from relevant sections
-  # This implements the "Retrieve" part of RTR - targeted extraction
-  - name: extract_datasets_from_section
+  - name: extract_dataset_references
     type: map
-    prompt: |
-      From this scientific paper section, extract dataset references:
-      
-      Section: {{ input.sections.title }}
-      Content: {{ input.sections.content }}
-      
-      Extract ALL dataset identifiers mentioned. Look for:
-      - Accession codes (GSE#####, PXD#####, phs######, SRP####, etc.)
-      - Named datasets (specific database entries, not just database names)
-      - DOIs that point to datasets
-      - Dataset URLs or repository links
-      
-      For each dataset found, provide:
-      1. dataset_identifier: The specific ID or name (e.g., "GSE60052", "PDC000234")
-      2. repository: The database/repository name (e.g., "GEO", "ProteomeXchange", "dbGaP")
-      3. url: Any URL or DOI mentioned (if available)
-      
-      IMPORTANT:
-      - Extract ONLY specific dataset identifiers, NOT general database names
-      - "GEO" alone is NOT a dataset - "GSE60052" IS a dataset
-      - "ProteomeXchange" alone is NOT a dataset - "PXD052949" IS a dataset
-      - Exclude funding agency identifiers
-      - Exclude software or tool names unless they are datasets
-      
-      If no specific datasets are found in this section, return an empty list.
+    max_batch_size: 1
     output:
       schema:
-        datasets: "list[{dataset_identifier: string, repository: string, url: string}]"
+        paper_id: string
+        paper_doi: string
+        pmcid: string
+        pmid: string
+        dataset_references: "list[{dataset_identifier: string, repository: string, evidence: string, confidence: string, notes: string}]"
+    prompt: |
+      You are a careful scientific data curator.
+
+      Your task: extract every explicit dataset reference present in the
+      full document text below. A "dataset reference" is a pointer to a
+      specific published dataset, identified by an accession number, repository
+      record ID, or DOI (or some combination thereof).
+
+      Paper identifiers (carry these through unchanged):
+        paper_id: {{ input.paper_id }}
+        paper_doi: {{ input.paper_doi }}
+        pmcid: {{ input.pmcid }}
+        pmid: {{ input.pmid }}
+
+      Title: {{ input.title }}
+
+      Full document text (entire paper — search all sections including methods,
+      data availability, figure captions, supplementary mentions, and back matter):
+
+      {{ input.full_text }}
+
+      Repositories and their identifier patterns to look for:
+        - GEO: GSE####, GSM####, GPL####, GDS####
+        - ProteomeXchange: PXD######
+        - PRIDE: PXD###### (deposited via ProteomeXchange)
+        - MassIVE: MSV######
+        - jPOST: JPST######
+        - iProX: IPX######
+        - PeptideAtlas / PASS: PASS#####
+        - PanoramaPublic
+        - ArrayExpress: E-MTAB-####, E-GEOD-####, E-PROT-####, E-MEXP-####
+        - SRA: SRP######, SRR######, SRX######, SRS######
+        - BioProject: PRJNA######, PRJEB######, PRJDB######
+        - BioSample: SAMN########, SAMEA########
+        - ENA: ERP######, ERR######, ERX######
+        - Dryad / Zenodo / Figshare / Dataverse / Mendeley Data: a DOI
+
+      Rules — read carefully:
+      1. Extract ONLY identifiers explicitly written in the paper.
+         Never invent or guess identifiers.
+      2. If text says "data are available upon request" with NO identifier
+         and NO repository, do not output a row.
+      3. If multiple distinct datasets are mentioned, output one row per
+         dataset. Do NOT emit the same dataset twice — if the same
+         identifier appears in multiple places, output it once.
+      4. If an identifier is malformed or partial, still extract it but
+         set confidence to "low" and explain in notes.
+      5. If the repository is not named but the prefix is strongly
+         diagnostic (GSE → GEO, PXD → ProteomeXchange, MSV → MassIVE,
+         PRJNA → BioProject, etc.), set the canonical repository name.
+         Otherwise leave repository as an empty string.
+      6. Quote a short evidence snippet (≤ 240 chars) directly from the
+         text so the extraction is auditable.
+      7. confidence ∈ {"high", "medium", "low"}. Use "high" only when both
+         the identifier and the repository are explicit in the text.
+      8. Do NOT include URLs. URL construction is handled downstream.
+      9. If no dataset references are present, return an empty list for
+         dataset_references.
+
+      What is NOT a dataset reference (do not extract these):
+      - Filenames of files downloaded from a repository
+        (e.g. "CCLE_DepMap_19Q1_TPM.csv", "Table_S2_*.xlsx",
+        "*.maf.txt", "*.gct"). These live INSIDE a dataset; the
+        dataset is the parent record.
+      - Release tags or version labels for a portal (e.g. DepMap "19Q1",
+        "18Q3", "CCLE2019"). These name a release, not a dataset.
+      - Software / tool names and their version strings
+        (MaxQuant, Andromeda, GATK, SAMtools, etc.).
+      - Reference databases used for searching/annotation only
+        (UniProt, RefSeq, Ensembl, Pfam, Gene Ontology, contaminant
+        FASTAs) UNLESS the paper deposited new data there with a
+        specific accession.
+      - Datasets cited from OTHER published papers in the References
+        section that the current paper merely re-analyses without
+        depositing new data — only extract if the current paper itself
+        used the dataset as a primary input AND gives the accession.
+
+      When the paper uses a "release" of a portal (e.g. DepMap 19Q1),
+      output ONE row at the level of the underlying repository accession
+      (e.g. the dbGaP study or SRA project that backs that release) if
+      the paper names one; otherwise emit a single row with the portal
+      name as the repository and the release tag as the identifier and
+      confidence = "low".
+
+      Always copy paper_id, paper_doi, pmcid, pmid into your response
+      verbatim from the values above.
     validate:
-      - isinstance(output["datasets"], list)
-    num_retries_on_validate_failure: 2
-
-  # Step 4: Unnest datasets extracted from each relevant section
-  - name: unnest_datasets
-    type: unnest
-    unnest_key: datasets
-    keep_empty: false
-
-  # Step 5: Flatten the nested dataset structure
-  - name: flatten_dataset_fields
-    type: map
-    prompt: |
-      Extract dataset fields from: {{ input.datasets }}
-      
-      Return as top-level fields:
-      - dataset_identifier: {{ input.datasets.dataset_identifier }}
-      - repository: {{ input.datasets.repository }}
-      - url: {{ input.datasets.url }}
-    output:
-      schema:
-        dataset_identifier: string
-        repository: string
-        url: string
-
-  # Step 6: Filter out invalid entries
-  - name: filter_valid_datasets
-    type: filter
-    prompt: |
-      Dataset: {{ input.dataset_identifier }}
-      Repository: {{ input.repository }}
-      
-      Is this a valid, specific dataset identifier?
-      
-      Valid examples: GSE60052, PXD052949, phs003416.v1.p1, PDC000234
-      Invalid examples: GEO, ProteomeXchange, PRIDE (just database names)
-      Invalid examples: Funding IDs, software names, general database mentions
-      
-      Return true only if this is a specific dataset identifier.
-    output:
-      schema:
-        valid: bool
-
-  # Step 7: Resolve similar dataset identifiers
-  - name: resolve_datasets
-    type: resolve
-    blocking_keys:
-      - dataset_identifier
-    blocking_threshold: 0.7
-    comparison_prompt: |
-      Dataset 1: {{ input1.dataset_identifier }} ({{ input1.repository }})
-      Dataset 2: {{ input2.dataset_identifier }} ({{ input2.repository }})
-      
-      Are these the same dataset? Consider case variations and version suffixes.
-    embedding_model: text-embedding-3-small
-    resolution_prompt: |
-      Consolidate these dataset references:
-      {% for entry in inputs %}
-      - {{ entry.dataset_identifier }} ({{ entry.repository }}) - {{ entry.url }}
-      {% endfor %}
-      
-      Provide the canonical identifier and best repository/URL information.
-    output:
-      schema:
-        dataset_identifier: string
-        repository: string
-        url: string
-
-  # Step 8: Aggregate by dataset to count paper usage
-  - name: aggregate_dataset_usage
-    type: reduce
-    reduce_key:
-      - dataset_identifier
-    prompt: |
-      Dataset "{{ reduce_key }}" appears in {{ inputs|length }} paper(s).
-      
-      Papers: {% for paper in inputs %}{{ paper.xml_path }}{% if not loop.last %}, {% endif %}{% endfor %}
-      
-      Consolidate these entries into one final record.
-      Choose the best repository name from the non-empty repository values.
-      Choose the best URL from the non-empty URL values.
-      Include the final paper count and paper paths.
-    output:
-      schema:
-        dataset_identifier: string
-        repository: string
-        url: string
-        num_papers: int
-        paper_paths: list[string]
+      - "isinstance(output['dataset_references'], list)"
 
 pipeline:
   steps:
-    - name: extract_dataset_references
-      input: scientific_papers
+    - name: extract
+      input: papers
       operations:
-        - split_into_sections           # Decompose papers into sections
-        - filter_relevant_sections       # Reduce to relevant sections (RTR pattern)
-        - extract_datasets_from_section  # Extract from focused sections
-        - unnest_datasets                # Unpack consolidated datasets
-        - flatten_dataset_fields         # Flatten nested structure
-        - filter_valid_datasets          # Clean invalid entries
-        - resolve_datasets               # Deduplicate similar identifiers
-        - aggregate_dataset_usage        # Aggregate by dataset
+        - extract_dataset_references
   output:
     type: file
-    path: "../data/output/xml_results/xml_dataset_references_output.json"
-    intermediate_dir: "../intermediate_results/xml_pipeline"
+    path: "{{OUTPUT_PATH}}"
+    intermediate_dir: "{{INTERMEDIATE_DIR}}"

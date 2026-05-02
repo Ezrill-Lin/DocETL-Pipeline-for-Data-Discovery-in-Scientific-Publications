@@ -75,9 +75,10 @@ def run_pipeline(
     rendered = _render(
         pipeline_yaml.read_text(encoding="utf-8"),
         {
-            "INPUT_PATH": str(input_path),
-            "OUTPUT_PATH": str(raw_output),
-            "INTERMEDIATE_DIR": str(intermediate_dir),
+            # Use absolute paths to resolve the path difference between Linux/Mac and Windows.
+            "INPUT_PATH": input_path.as_posix(),
+            "OUTPUT_PATH": raw_output.as_posix(),
+            "INTERMEDIATE_DIR": intermediate_dir.as_posix(),
             "MODEL": model,
         },
     )
