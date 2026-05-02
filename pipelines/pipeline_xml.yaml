@@ -26,17 +26,17 @@
 
 default_model: "{{MODEL}}"
 
-# Self-imposed rate limits so DocETL backs off rather than hitting OpenAI's
-# hard limits. Tune count values to match your API tier:
-#   gpt-4o-mini Tier 1 : 200 000 TPM / 500 RPM
-#   gpt-4o-mini Tier 2 : 2 000 000 TPM / 5 000 RPM
+# Self-imposed rate limits so DocETL backs off rather than hitting API limits.
+# Tune count values to match your API tier:
+#   gemini-2.5-flash free tier : 1 000 000 TPM / 10 RPM
+#   gemini-2.5-flash paid tier : 4 000 000 TPM / 1 000 RPM
 rate_limits:
   llm_call:
-    - count: 450
+    - count: 900
       per: 1
       unit: MINUTE
   llm_tokens:
-    - count: 180000
+    - count: 3500000
       per: 1
       unit: MINUTE
 
