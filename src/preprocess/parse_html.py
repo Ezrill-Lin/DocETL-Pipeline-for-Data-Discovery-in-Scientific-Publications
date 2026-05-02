@@ -5,11 +5,38 @@ import re
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, Comment, Tag
 
 DOI_RE = re.compile(r"10\.\d{4,9}/[\w\.\-/:;()<>]+", re.IGNORECASE)
 PMCID_RE = re.compile(r"PMC\d{4,}", re.IGNORECASE)
 PMID_RE = re.compile(r"\bpmid[:\s]*(\d{4,9})\b", re.IGNORECASE)
+
+# Tags that carry no readable content and inflate token counts.
+_STRIP_TAGS: frozenset[str] = frozenset({
+    # Browser / rendering noise
+    "script", "style", "noscript",
+    # Media embeds
+    "img", "iframe", "video", "audio", "canvas", "svg",
+    "object", "embed",
+    # UI elements
+    "button", "input", "select", "textarea", "form",
+    # HTML document metadata (IDs are extracted from `raw` fallback)
+    "head", "meta", "link",
+})
+
+
+def _strip_non_content(soup: BeautifulSoup) -> None:
+    """Remove non-content elements in-place to reduce token count.
+
+    Must be called after soup creation but before text extraction.
+    ID-finder functions (_find_doi, _find_pmcid, _find_pmid) use the
+    original `raw` string as a regex fallback, so stripping <meta> /
+    <head> from the tree does not break metadata extraction.
+    """
+    for tag in soup.find_all(_STRIP_TAGS):
+        tag.decompose()
+    for comment in soup.find_all(string=lambda t: isinstance(t, Comment)):
+        comment.extract()
 
 
 def _text(node: Tag | None) -> str:
@@ -114,17 +141,6 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
         for idx, sec in enumerate(body.find_all("sec", recursive=False), start=1):
             walk(sec, [f"body/sec[{idx}]"])
 
-        # Figure captions and supplementary material outside numbered sections
-        for fig in body.find_all(["fig", "table-wrap", "supplementary-material"]):
-            cap = fig.find("caption")
-            if cap and _text(cap):
-                sections.append({
-                    "section_title": f"[{fig.name}]",
-                    "section_text": _text(cap),
-                    "section_path": fig.name,
-                    "page": None,
-                })
-
     # PMC JATS often files data-availability statements under
     # <back><notes notes-type="data-availability"> rather than as a body
     # <sec>. Harvest those plus any other notes/sec inside <back>.
@@ -198,6 +214,7 @@ def parse_html_text(raw: str, source: str = "", default_paper_id: str = "") -> d
     # Try lxml-xml for JATS, fall back to lxml HTML
     is_xml = "<article" in raw[:2000] or raw.lstrip().startswith("<?xml")
     soup = BeautifulSoup(raw, "lxml-xml") if is_xml else BeautifulSoup(raw, "lxml")
+    _strip_non_content(soup)
 
     article_node = soup.find("article")
     if article_node and article_node.find("body"):
