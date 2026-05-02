@@ -66,17 +66,29 @@ def _failure_examples(metrics: dict[str, Any] | None, k: int = 5) -> str:
 
 
 def generate_report(
-    docetl_metrics_path: Path,
+    rtr_metrics_path: Path,
+    fdr_metrics_path: Path,
     datagatherer_metrics_path: Path | None,
-    docetl_run_summary: dict[str, Any] | None,
+    rtr_run_summary: dict[str, Any] | None,
+    fdr_run_summary: dict[str, Any] | None,
     datagatherer_run_summary: dict[str, Any] | None,
     output_path: Path,
+    # Legacy aliases so callers that pass docetl_metrics_path still work
+    docetl_metrics_path: Path | None = None,
+    docetl_run_summary: dict[str, Any] | None = None,
 ) -> Path:
-    docetl_m = _maybe_load(docetl_metrics_path)
+    # Support legacy single-strategy callers
+    if docetl_metrics_path is not None:
+        rtr_metrics_path = docetl_metrics_path
+    if docetl_run_summary is not None:
+        rtr_run_summary = docetl_run_summary
+
+    rtr_m = _maybe_load(rtr_metrics_path)
+    fdr_m = _maybe_load(fdr_metrics_path)
     dg_m = _maybe_load(datagatherer_metrics_path) if datagatherer_metrics_path else None
 
     parts: list[str] = []
-    parts.append("# Dataset Reference Extraction — DocETL vs DataGatherer\n")
+    parts.append("# Dataset Reference Extraction — RTR vs FDR vs DataGatherer\n")
     parts.append(
         "## 1. Project overview\n"
         "This project builds a DocETL pipeline that extracts dataset references "
@@ -127,52 +139,66 @@ def generate_report(
         "values are normalized identically for predictions and ground truth.\n"
     )
 
-    parts.append("## 6. Metrics — DocETL\n")
-    parts.append(_metrics_table(docetl_m, "DocETL"))
-    parts.append(_failure_examples(docetl_m))
+    parts.append("## 6. Metrics — DocETL RTR (Retrieve-Then-Read)\n")
+    parts.append(_metrics_table(rtr_m, "DocETL RTR"))
+    parts.append(_failure_examples(rtr_m))
 
-    parts.append("## 7. Metrics — DataGatherer (baseline)\n")
+    parts.append("## 7. Metrics — DocETL FDR (Full-Document Read)\n")
+    parts.append(_metrics_table(fdr_m, "DocETL FDR"))
+    parts.append(_failure_examples(fdr_m))
+
+    parts.append("## 8. Metrics — DataGatherer (baseline)\n")
     if dg_m is None:
         parts.append("_DataGatherer baseline metrics not available._\n")
     else:
         parts.append(_metrics_table(dg_m, "DataGatherer"))
         parts.append(_failure_examples(dg_m))
 
-    # Comparison
-    parts.append("## 8. Comparison\n")
-    if docetl_m and dg_m:
-        d_p = docetl_m["pair_micro"]["f1"]
-        g_p = dg_m["pair_micro"]["f1"]
-        d_t = docetl_m["triple_micro"]["f1"]
-        g_t = dg_m["triple_micro"]["f1"]
-        parts.append(
-            f"| Aspect | DocETL | DataGatherer |\n|---|---|---|\n"
-            f"| Pair F1 (micro) | {d_p} | {g_p} |\n"
-            f"| Triple F1 (micro) | {d_t} | {g_t} |\n"
-            f"| Papers covered | {docetl_m['coverage']['n_papers_with_prediction']} | "
-            f"{dg_m['coverage']['n_papers_with_prediction']} |\n"
-        )
+    # Three-way comparison table
+    parts.append("## 9. Comparison\n")
+    rows_available = [m for m in [(rtr_m, "DocETL RTR"), (fdr_m, "DocETL FDR"), (dg_m, "DataGatherer")] if m[0]]
+    if len(rows_available) >= 2:
+        header = "| Aspect | " + " | ".join(label for _, label in rows_available) + " |"
+        sep    = "|---|" + "---|" * len(rows_available)
+        def _val(m, *keys):
+            v = m
+            for k in keys:
+                v = (v or {}).get(k, "-")
+            return v
+        table_lines = [header, sep]
+        for aspect, *keys in [
+            ("Pair precision",  "pair_micro",   "precision"),
+            ("Pair recall",     "pair_micro",   "recall"),
+            ("Pair F1 (micro)", "pair_micro",   "f1"),
+            ("Triple F1 (micro)", "triple_micro", "f1"),
+            ("Pair F1 (macro)", "pair_macro",   "f1"),
+            ("Papers covered",  "coverage",     "n_papers_with_prediction"),
+            ("Total predictions", "coverage",   "n_total_predictions"),
+        ]:
+            vals = " | ".join(str(_val(m, *keys)) for m, _ in rows_available)
+            table_lines.append(f"| {aspect} | {vals} |")
+        parts.append("\n".join(table_lines) + "\n")
     else:
         parts.append("Side-by-side metrics will appear here once both runs are completed.\n")
 
     cost_lines = []
-    if docetl_run_summary:
-        cost_lines.append(f"- DocETL: {json.dumps(docetl_run_summary.get('cost', {}))}")
-    if datagatherer_run_summary:
-        cost_lines.append(f"- DataGatherer: {json.dumps({k: v for k, v in datagatherer_run_summary.items() if k != 'predictions_path'})}")
+    for label, summary in [("RTR", rtr_run_summary), ("FDR", fdr_run_summary), ("DataGatherer", datagatherer_run_summary)]:
+        if summary:
+            cost_lines.append(f"- {label}: {json.dumps(summary.get('cost', summary))}")
     if cost_lines:
         parts.append("\n**Cost / runtime:**\n" + "\n".join(cost_lines) + "\n")
 
     parts.append(
-        "\n**Engineering effort:** the DocETL implementation is one YAML file "
-        "(`pipelines/dataset_reference_extraction.yaml`) plus deterministic "
-        "post-processing. Iterating on the prompt or the candidate-passage "
-        "selector requires no Python rewrite. DataGatherer is a more "
-        "specialized pipeline — strong defaults, less flexibility per change.\n"
+        "\n**Engineering effort:** both DocETL strategies are defined in YAML files "
+        "plus deterministic post-processing. RTR uses pre-filtered candidate passages "
+        "(cheaper, faster); FDR passes the full document to a large-context model "
+        "(higher recall, higher cost). Iterating on the prompt or passage selector "
+        "requires no Python rewrite. DataGatherer is a more specialized pipeline — "
+        "strong defaults, less flexibility per change.\n"
     )
 
     parts.append(
-        "## 9. Failure analysis\n"
+        "## 10. Failure analysis\n"
         "See the failure-example sections above. Common categories:\n"
         "- **missed_identifier** — accession buried in a non-canonical section "
         "(e.g. References) or stated only in a supplementary file we did not "
@@ -186,12 +212,13 @@ def generate_report(
     )
 
     parts.append(
-        "## 10. Reflection: DocETL vs specialized tools\n"
-        "DocETL trades a few percentage points of accuracy on edge cases for "
-        "very fast iteration: the entire pipeline, including the LLM prompt, "
-        "fits in one YAML. A specialized tool like DataGatherer encodes more "
-        "domain knowledge but is harder to retarget. The right choice depends "
-        "on whether the team owns the prompt loop or the curation rules.\n"
+        "## 11. Reflection: RTR vs FDR vs specialized tools\n"
+        "RTR trades recall for efficiency: it never misses a dataset that appears "
+        "in a passage matched by the retrieval heuristic, but can miss ones buried "
+        "in unexpected sections. FDR with a large-context model (Gemini 2.5 Flash, "
+        "1M token window) sees the full text, improving recall at higher API cost. "
+        "DataGatherer encodes more domain knowledge but is harder to retarget. "
+        "The right choice depends on cost tolerance and the diversity of paper formats.\n"
     )
 
     output_path = Path(output_path)

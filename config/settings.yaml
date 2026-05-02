@@ -6,8 +6,8 @@ paths:
   outputs_dir: outputs
 
 docetl:
-  default_model: gpt-4o-mini
-  pipeline_yaml: pipelines/dataset_reference_extraction.yaml
+  default_model: gemini/gemini-2.5-flash
+  pipeline_yaml: pipelines/pipeline_rtr.yaml
   intermediate_dir: data/processed/.docetl_cache
 
 evaluation:
