@@ -61,67 +61,85 @@ operations:
       {{ input.candidate_passages }}
 
       Repositories and their identifier patterns to look for:
-        - GEO: GSE####, GSM####, GPL####, GDS####
-        - ProteomeXchange: PXD######
-        - PRIDE: PXD###### (deposited via ProteomeXchange)
-        - MassIVE: MSV######
-        - jPOST: JPST######
-        - iProX: IPX######
-        - PeptideAtlas / PASS: PASS#####
-        - PanoramaPublic
-        - ArrayExpress: E-MTAB-####, E-GEOD-####, E-PROT-####, E-MEXP-####
-        - SRA: SRP######, SRR######, SRX######, SRS######
-        - BioProject: PRJNA######, PRJEB######, PRJDB######
-        - BioSample: SAMN########, SAMEA########
-        - ENA: ERP######, ERR######, ERX######
-        - Dryad / Zenodo / Figshare / Dataverse / Mendeley Data: a DOI
+      {{REPOSITORIES}}
 
-      Rules — read carefully:
-      1. Extract ONLY identifiers explicitly written in the paper.
-         Never invent or guess identifiers.
-      2. If text says "data are available upon request" with NO identifier
-         and NO repository, do not output a row.
-      3. If multiple distinct datasets are mentioned, output one row per
-         dataset. Do NOT emit the same dataset twice — if the same
-         identifier appears in two passages, output it once.
-      4. If an identifier is malformed or partial, still extract it but
-         set confidence to "low" and explain in notes.
-      5. If the repository is not named but the prefix is strongly
-         diagnostic (GSE → GEO, PXD → ProteomeXchange, MSV → MassIVE,
-         PRJNA → BioProject, etc.), set the canonical repository name.
-         Otherwise leave repository as an empty string.
-      6. Quote a short evidence snippet (≤ 240 chars) directly from the
-         passages so the extraction is auditable.
-      7. confidence ∈ {"high", "medium", "low"}. Use "high" only when both
-         the identifier and the repository are explicit in the text.
-      8. Do NOT include URLs. URL construction is handled downstream.
-      9. If no dataset references are present, return an empty list for
-         dataset_references.
+      Anti-hallucination rules — these come first:
+      A. Every identifier you emit MUST appear verbatim somewhere in the
+         passages above. Copy/paste the exact characters, including the
+         numeric portion. The list of repository prefixes above is for
+         RECOGNITION ONLY — never use it as a template to invent
+         identifiers (no "GSE12345", "PXD00001", etc., unless those exact
+         strings are in the passages).
+      B. If the candidate passages contain no accession-like identifier
+         and no repository name, return an empty list for
+         dataset_references. Do not guess from the title or your prior
+         knowledge of the paper.
+      C. Quote a short evidence snippet (≤ 240 chars) directly from the
+         passages. The dataset_identifier you emit MUST be a substring
+         (case-insensitive) of that evidence quote.
 
-      What is NOT a dataset reference (do not extract these):
+      Extraction rules:
+      1. Extract every distinct dataset reference. Output one row per
+         dataset. If the same identifier appears in two passages, emit
+         it once.
+      2. If an identifier is malformed (only a prefix, missing digits, or
+         clearly truncated), DO NOT emit it. A bare "GSE" or "PXD" with
+         no digits is never a valid dataset reference.
+      3. If the repository is not named explicitly but the prefix is
+         strongly diagnostic (GSE → GEO, PXD → PRIDE, MSV → MassIVE,
+         PRJNA → BioProject, phs → dbGaP, EGAS → EGA, etc.), set the
+         canonical repository name from the list above. Otherwise leave
+         repository as an empty string.
+      4. confidence ∈ {"high", "medium", "low"}. Use "high" only when
+         both the identifier and the repository are explicit in the text.
+      5. Do NOT include URLs. URL construction is handled downstream.
+
+      N/A safety valve — emit "N/A" instead of guessing:
+      - If the paper clearly references a dataset (e.g., names a
+        repository, a study, or a portal) but does NOT provide a specific
+        accession in the passages, emit ONE row with
+        dataset_identifier = "N/A", repository = <the repository or
+        organisation named>, evidence = the quoted phrase, confidence =
+        "low", and a note like "repository named, no accession given".
+      - If you genuinely cannot extract any reference, return an empty
+        list. Never substitute a placeholder like "GSE12345" or "PXD00001"
+        when you don't have a real identifier.
+
+      Categorical exclusions (do NOT emit any of these as a dataset
+      reference, no matter how the surrounding text is phrased):
       - Filenames of files downloaded from a repository
         (e.g. "CCLE_DepMap_19Q1_TPM.csv", "Table_S2_*.xlsx",
-        "*.maf.txt", "*.gct"). These live INSIDE a dataset; the
-        dataset is the parent record.
-      - Release tags or version labels for a portal (e.g. DepMap "19Q1",
-        "18Q3", "CCLE2019"). These name a release, not a dataset.
-      - Software / tool names and their version strings
-        (MaxQuant, Andromeda, GATK, SAMtools, etc.).
-      - Reference databases used for searching/annotation only
-        (UniProt, RefSeq, Ensembl, Pfam, Gene Ontology, contaminant
-        FASTAs) UNLESS the paper deposited new data there with a
-        specific accession.
+        "*.maf.txt", "*.gct", "NIHMS*-supplement-*.pdf"). These live
+        INSIDE a dataset; the dataset is the parent record.
+      - Version / release tags of a portal (e.g. "19Q1", "18Q3",
+        "CCLE2019", "v1.2.0"). These name a release, not a dataset.
+      - Software, tool, or package names and their version strings
+        (MaxQuant, Andromeda, GATK, SAMtools, pyGAM,
+        DoubletDetection, etc.) — including DOIs that point to a
+        software release on Zenodo / GitHub. If the surrounding text
+        describes a "package", "tool", "pipeline", "library", or
+        "software", the DOI is software, not data.
+      - Numbers in parentheses next to a cited entity, e.g.
+        "DepMap (19)" — the "(19)" is a citation reference number, not
+        a dataset identifier.
+      - Reference databases used for annotation only (UniProt, RefSeq,
+        Ensembl, Pfam, Gene Ontology, contaminant FASTAs) UNLESS the
+        paper deposited new data there with a specific accession.
+      - GenBank single-record accessions for reagents (vectors,
+        plasmids, primers, individual sequences) — these are
+        construct-level, not dataset-level.
       - Datasets cited from OTHER published papers in the References
         section that the current paper merely re-analyses without
         depositing new data — only extract if the current paper itself
         used the dataset as a primary input AND gives the accession.
 
-      When the paper uses a "release" of a portal (e.g. DepMap 19Q1),
-      output ONE row at the level of the underlying repository accession
-      (e.g. the dbGaP study or SRA project that backs that release) if
-      the paper names one; otherwise emit a single row with the portal
-      name as the repository and the release tag as the identifier and
-      confidence = "low".
+      When a paper deposits data via PRIDE (which mirrors to
+      ProteomeXchange), the canonical repository for a PXD identifier is
+      PRIDE. When a paper deposits via BioProject, the BioProject
+      accession (PRJNA / PRJEB / PRJDB) is the canonical, even if the
+      passage also names SRA. Pick one canonical repository per
+      identifier — do not duplicate the same accession under two
+      repository labels.
 
       Always copy paper_id, paper_doi, pmcid, pmid into your response
       verbatim from the values above.
