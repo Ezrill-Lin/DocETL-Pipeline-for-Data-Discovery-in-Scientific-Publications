@@ -27,7 +27,7 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--input", required=True, type=Path, help="papers.json from prepare_inputs.py")
     p.add_argument("--output", required=True, type=Path, help="Final predictions JSONL path")
-    p.add_argument("--pipeline", type=Path, default=REPO_ROOT / docetl_cfg.get("pipeline_yaml", "pipelines/dataset_reference_extraction.yaml"))
+    p.add_argument("--pipeline", type=Path, default=REPO_ROOT / docetl_cfg.get("pipeline_yaml", "pipelines/pipeline_rtr.yaml"))
     p.add_argument("--model", default=docetl_cfg.get("default_model"))
     p.add_argument("--intermediate-dir", type=Path, default=REPO_ROOT / docetl_cfg.get("intermediate_dir", "data/processed/.docetl_cache"))
     p.add_argument("--cost-summary", type=Path, default=REPO_ROOT / "outputs" / "cost_docetl.json")

@@ -14,7 +14,7 @@
 #   src/preprocess/build_docetl_input.build_json_array. Each record contains
 #   a `full_text` field with the entire cleaned document text.
 #
-# Output schema is identical to dataset_reference_extraction.yaml (RTR) so
+# Output schema is identical to pipeline_rtr.yaml (RTR) so
 # that the same normalize_outputs.py and evaluate_docetl.py work unchanged.
 #
 # Notes:

@@ -20,7 +20,7 @@ from .normalize_outputs import flatten_docetl_output, write_predictions
 from .registry import prompt_repository_block
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_PIPELINE = REPO_ROOT / "pipelines" / "dataset_reference_extraction.yaml"
+DEFAULT_PIPELINE = REPO_ROOT / "pipelines" / "pipeline_rtr.yaml"
 
 
 def _render(text: str, mapping: dict[str, str]) -> str:
