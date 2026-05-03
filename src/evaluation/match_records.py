@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..extraction.registry import is_na_identifier, synonym_group
 from ..extraction.url_builder import normalize_identifier, normalize_repository
 from .load_groundtruth import paper_key
 
@@ -50,6 +51,16 @@ def match_pairs(
     Returns dicts of true_positives, false_positives, false_negatives. Each
     item is a tuple (canonical_paper_key, dataset_id[, repo]) so callers can
     enumerate failures for the report.
+
+    Repository synonyms (PRIDE / ProteomeXchange, GEO / Gene Expression
+    Omnibus, etc.) are resolved to a shared group key in the triple-aware
+    mode, so equivalent labels do not count as a mismatch. The grouping
+    comes from `synonym_group` in config/repositories.yaml.
+
+    The sentinel `N/A` identifier is treated like any other identifier:
+    a prediction of `N/A` for a paper matches a groundtruth `N/A` row for
+    the same paper. This lets the system surface "this paper has no
+    extractable accession" as a meaningful prediction.
     """
     pred_index = build_paper_index(predictions)
     gt_index = build_paper_index(groundtruth)
@@ -57,9 +68,10 @@ def match_pairs(
     def _key(row: dict[str, Any]) -> tuple[str, ...]:
         ckey = resolve_paper(row, [gt_index, pred_index])
         ds = normalize_identifier(row.get("dataset_identifier", "")).lower()
-        repo = normalize_repository(row.get("repository", ""))
+        repo_raw = row.get("repository", "")
         if repository_aware:
-            return (ckey, ds, repo)
+            # Use synonym groups so PRIDE↔ProteomeXchange etc. compare equal.
+            return (ckey, ds, synonym_group(repo_raw))
         return (ckey, ds)
 
     pred_set: set[tuple[str, ...]] = set()

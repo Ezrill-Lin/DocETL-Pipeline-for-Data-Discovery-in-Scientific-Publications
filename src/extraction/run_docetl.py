@@ -17,6 +17,7 @@ import yaml
 from dotenv import load_dotenv
 
 from .normalize_outputs import flatten_docetl_output, write_predictions
+from .registry import prompt_repository_block
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PIPELINE = REPO_ROOT / "pipelines" / "dataset_reference_extraction.yaml"
@@ -80,6 +81,11 @@ def run_pipeline(
             "OUTPUT_PATH": raw_output.as_posix(),
             "INTERMEDIATE_DIR": intermediate_dir.as_posix(),
             "MODEL": model,
+            # The registry is the single source of truth for repositories.
+            # Render the per-repo bullet list into the prompt at run time so
+            # adding a repository to repositories.yaml propagates automatically.
+            # Indent matches the surrounding `prompt: |` block scalar.
+            "REPOSITORIES": prompt_repository_block(indent="      "),
         },
     )
 

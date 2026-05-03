@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from .registry import NA_IDENTIFIER, is_na_identifier
+
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "repositories.yaml"
 
 
@@ -32,10 +34,19 @@ def normalize_identifier(identifier: str) -> str:
     Identifiers are normalized to upper case for known accession prefixes
     (GSE, PXD, MSV, ...) and left untouched otherwise (DOIs are kept verbatim
     because they are case-insensitive but often presented in lower case).
+
+    The sentinel `N/A` (and case-insensitive variants `n/a`, `na`, `none`,
+    `null`) is preserved as the canonical sentinel "N/A" — this lets the
+    pipeline emit a row when a paper has no extractable identifier rather
+    than hallucinating one.
     """
     if identifier is None:
         return ""
     s = str(identifier).strip()
+    if not s:
+        return ""
+    if is_na_identifier(s):
+        return NA_IDENTIFIER
     # Iteratively peel off surrounding punctuation/quotes
     junk = "\"'`()[]{}.,;:"
     prev = None
@@ -49,7 +60,12 @@ def normalize_identifier(identifier: str) -> str:
         s = s[len("https://doi.org/"):]
     elif s.lower().startswith("http://doi.org/"):
         s = s[len("http://doi.org/"):]
-    # Upper-case known accession-style prefixes
+    # Collapse the documented ProteomeXchange DOI alias `10.6019/PXD#####` to
+    # the bare `PXD#####` form so within-paper duplicates are caught.
+    m = re.match(r"^10\.6019/(PXD\d+)$", s, re.IGNORECASE)
+    if m:
+        s = m.group(1)
+    # Upper-case known accession-style prefixes (sourced from the registry)
     accession_prefixes = (
         "GSE", "GSM", "GPL", "GDS", "PXD", "MSV", "JPST", "IPX", "PASS",
         "E-MTAB", "E-GEOD", "E-PROT", "E-MEXP",
@@ -57,6 +73,7 @@ def normalize_identifier(identifier: str) -> str:
         "PRJNA", "PRJEB", "PRJDB",
         "SAMN", "SAMEA", "SAMD",
         "ERP", "ERR", "ERX", "ERS",
+        "EGAS", "EGAD", "PDC",
     )
     upper = s.upper()
     for p in accession_prefixes:
@@ -105,9 +122,9 @@ def infer_repository(identifier: str, repository: str | None) -> str:
         for repo in _load_config():
             if repo["canonical"] == norm_repo:
                 return norm_repo
-    # Prefix-driven inference
+    # Prefix-driven inference (registry-defined; case-insensitive)
     for repo in _load_config():
-        for prefix in repo.get("prefixes", []):
+        for prefix in repo.get("prefixes", []) or []:
             if norm_id.upper().startswith(prefix.upper()):
                 return repo["canonical"]
     if _DOI_RE.match(norm_id):
@@ -120,7 +137,7 @@ def infer_repository(identifier: str, repository: str | None) -> str:
 def build_dataset_url(identifier: str, repository: str | None) -> str:
     """Construct a dataset URL deterministically. Empty string if unknown."""
     norm_id = normalize_identifier(identifier)
-    if not norm_id:
+    if not norm_id or norm_id == NA_IDENTIFIER:
         return ""
     canonical = infer_repository(norm_id, repository)
     if not canonical:
