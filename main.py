@@ -30,6 +30,26 @@ from src.extraction.run_docetl import run_pipeline
 from src.preprocess.build_docetl_input import build_json_array
 from src.reporting.generate_report import generate_report
 
+# Lazy imports from scripts/ (added here to avoid circular deps)
+def _load_script(name: str) -> Any:
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, REPO_ROOT / "scripts" / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    return mod
+
+
+def _download_benchmarks() -> int:
+    return _load_script("download_benchmarks").main()
+
+
+def _fetch_papers(gt_path: Path, out_dir: Path, pdf: bool = False) -> int:
+    mod = _load_script("fetch_exp_papers")
+    argv = ["--groundtruth", str(gt_path), "--out-dir", str(out_dir)]
+    if pdf:
+        argv.append("--pdf")
+    return mod.main(argv)
+
 
 def _load_settings() -> dict:
     p = REPO_ROOT / "config" / "settings.yaml"
@@ -67,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip-rtr", action="store_true", help="Skip RTR pipeline")
     p.add_argument("--skip-fdr", action="store_true", help="Skip FDR pipeline")
     p.add_argument("--skip-datagatherer", action="store_true", help="Skip DataGatherer baseline")
+    p.add_argument("--skip-fetch", action="store_true",
+                   help="Skip auto-fetching benchmark and raw papers")
 
     args = p.parse_args(argv)
 
@@ -96,6 +118,49 @@ def main(argv: list[str] | None = None) -> int:
         "datagatherer": outputs_dir / "metrics_datagatherer.json",
     }
     summaries: dict[str, dict | None] = {"rtr": None, "fdr": None, "dg": None}
+
+    # ── Stage 0: Auto-download benchmark + raw papers ─────────────────────
+    benchmark_dir = REPO_ROOT / paths.get("benchmark_dir", "data/benchmark")
+    # Determine which GT file we expect
+    expected_gt = (
+        Path(args.groundtruth) if args.groundtruth
+        else REPO_ROOT / list(eval_cfg.get("benchmark_files", {"exp": "data/benchmark/EXP_groundtruth.csv"}).values())[0]
+    )
+    if not args.skip_fetch:
+        # Download benchmark if missing
+        if not expected_gt.exists():
+            print("[stage 0/5] Downloading benchmark ground truth from Zenodo...")
+            try:
+                _download_benchmarks()
+            except Exception:
+                print("  [warn] Benchmark download failed — evaluation will be skipped.")
+                traceback.print_exc()
+        else:
+            print(f"[stage 0/5] Benchmark already present at {expected_gt}")
+
+        # Fetch raw papers if raw_dir/<fmt> is empty
+        raw_dir_check = raw_base / fmt
+        expected_suffix = ".pdf" if fmt == "pdf" else ".xml"
+        has_papers = raw_dir_check.exists() and any(
+            f for f in raw_dir_check.iterdir()
+            if f.suffix == expected_suffix and f.stat().st_size > 100
+        ) if raw_dir_check.exists() else False
+        if not has_papers and expected_gt.exists():
+            print(f"[stage 0/5] No raw {fmt.upper()} papers found in {raw_dir_check} — fetching...")
+            if fmt == "pdf":
+                print("  (PDF mode: using browser automation via Playwright)")
+            raw_dir_check.mkdir(parents=True, exist_ok=True)
+            try:
+                _fetch_papers(expected_gt, raw_dir_check, pdf=(fmt == "pdf"))
+            except Exception:
+                print("  [warn] Paper fetch failed — pipeline will abort at preprocessing.")
+                traceback.print_exc()
+        elif not has_papers:
+            print("  [warn] No raw papers and no ground truth to fetch from — skipping fetch.")
+        else:
+            print(f"[stage 0/5] Raw {fmt.upper()} papers already present in {raw_dir_check}")
+    else:
+        print("[stage 0/5] --skip-fetch set; skipping auto-download.")
 
     # ── Stage 1: Preprocess ────────────────────────────────────────────────
     print("[stage 1/5] Preprocessing papers")
