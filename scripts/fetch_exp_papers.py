@@ -20,6 +20,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import re
 import sys
@@ -35,7 +36,7 @@ from src.evaluation.load_groundtruth import load_groundtruth
 from src.preprocess.browser_automation import download_pdf, BrowserAutomationError
 
 GT_PATH = REPO_ROOT / "data" / "benchmark" / "EXP_groundtruth.csv"
-OUT_DIR = REPO_ROOT / "data" / "raw"
+RAW_BASE = REPO_ROOT / "data" / "raw"
 
 # NCBI E-utilities efetch returns JATS XML for PMC.
 EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
@@ -50,16 +51,30 @@ def _fetch_pmc_xml(pmcid: str, out_dir: Path, index: str) -> None:
         return
     numeric_id = pmcid.replace("PMC", "").replace("pmc", "")
     params = {"db": "pmc", "id": numeric_id, "rettype": "xml"}
-    try:
-        r = requests.get(EFETCH_URL, params=params, timeout=60)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[{index}] {pmcid}  FAILED (xml): {e}")
+    # Retry with exponential back-off on 429 (NCBI rate-limit).
+    # Base delay between requests keeps us at ≤ 3 req/s across all workers.
+    delay = 1.0
+    for attempt in range(5):
+        try:
+            r = requests.get(EFETCH_URL, params=params, timeout=60)
+            if r.status_code == 429:
+                print(f"[{index}] {pmcid}  rate-limited, retrying in {delay:.1f}s …")
+                time.sleep(delay)
+                delay *= 2
+                continue
+            r.raise_for_status()
+        except requests.HTTPError as e:
+            print(f"[{index}] {pmcid}  FAILED (xml): {e}")
+            return
+        except Exception as e:
+            print(f"[{index}] {pmcid}  FAILED (xml): {e}")
+            return
+        out.write_bytes(r.content)
+        print(f"[{index}] {pmcid}  {len(r.content):,} bytes  (xml)")
+        # Be polite to NCBI: ≤ 3 req/s without an API key.
+        time.sleep(0.4)
         return
-    out.write_bytes(r.content)
-    print(f"[{index}] {pmcid}  {len(r.content):,} bytes  (xml)")
-    # Be polite to NCBI: ≤ 3 req/s without an API key.
-    time.sleep(0.4)
+    print(f"[{index}] {pmcid}  FAILED (xml): too many 429s after 5 attempts")
 
 
 def _fetch_pdf(paper_id: str, url: str, out_dir: Path, index: str, headless: bool) -> None:
@@ -107,8 +122,8 @@ def main(argv: list[str] | None = None) -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--groundtruth", type=Path, default=GT_PATH,
                    help=f"Path to ground-truth CSV (default: {GT_PATH.relative_to(REPO_ROOT)})")
-    p.add_argument("--out-dir", type=Path, default=OUT_DIR,
-                   help=f"Output directory (default: {OUT_DIR.relative_to(REPO_ROOT)})")
+    p.add_argument("--out-dir", type=Path, default=None,
+                   help="Output directory (default: data/raw/xml or data/raw/pdf depending on --pdf)")
     p.add_argument("--pdf", action="store_true",
                    help="Download PDFs via browser automation for ALL papers (including PMC). "
                         "Saved as <paper_id>.pdf alongside any .xml files. "
@@ -118,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     headless = not args.no_headless
+    # Default output directory is format-specific so XML and PDF stay separate.
+    if args.out_dir is None:
+        args.out_dir = RAW_BASE / ("pdf" if args.pdf else "xml")
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     entries = _load_gt_urls(args.groundtruth)
@@ -128,16 +146,36 @@ def main(argv: list[str] | None = None) -> int:
     if args.pdf:
         print("--pdf: will download PDFs via browser for all papers")
 
-    # Always fetch XML for PMC papers (unless --pdf-only behaviour is wanted)
+    # Always fetch XML for PMC papers (unless --pdf-only behaviour is wanted).
+    # Use up to 3 concurrent workers — NCBI's unauthenticated rate limit is 3 req/s.
+    # Each worker already sleeps 0.4 s after its request, so burst rate stays safe.
     if not args.pdf:
-        for i, (pmcid, _url) in enumerate(pmc_entries, 1):
-            _fetch_pmc_xml(pmcid, args.out_dir, f"{i}/{len(entries)}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            futs = {
+                pool.submit(_fetch_pmc_xml, pmcid, args.out_dir, f"{i}/{len(entries)}"): pmcid
+                for i, (pmcid, _url) in enumerate(pmc_entries, 1)
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                fut.result()  # re-raise any unexpected exception
 
-    # PDF downloads: non-PMC papers always, PMC papers only when --pdf is set
+    # PDF downloads: non-PMC papers always, PMC papers only when --pdf is set.
+    # Playwright opens an independent browser instance per download, so parallel
+    # execution is safe.  4 workers balance speed vs. memory / CPU usage.
     pdf_targets = (entries if args.pdf else pdf_entries)
     offset = 0 if args.pdf else len(pmc_entries)
-    for i, (paper_id, url) in enumerate(pdf_targets, 1):
-        _fetch_pdf(paper_id, url, args.out_dir, f"{offset+i}/{len(entries)}", headless)
+    if pdf_targets:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            futs = {
+                pool.submit(
+                    _fetch_pdf,
+                    paper_id, url, args.out_dir,
+                    f"{offset+i}/{len(entries)}",
+                    headless,
+                ): paper_id
+                for i, (paper_id, url) in enumerate(pdf_targets, 1)
+            }
+            for fut in concurrent.futures.as_completed(futs):
+                fut.result()
 
     return 0
 
