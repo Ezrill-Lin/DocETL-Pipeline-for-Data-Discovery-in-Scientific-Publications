@@ -14,6 +14,7 @@ Examples
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import sys
 import traceback
@@ -178,53 +179,62 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  ERROR: no raw papers in {raw_dir} and no processed file. Aborting.")
         return 1
 
-    # ── Stage 2a: RTR pipeline ─────────────────────────────────────────────
+    # ── Stages 2-3/5: RTR, FDR, DataGatherer (parallel) ──────────────────
+    # Each task gets its own DocETL intermediate-cache directory to avoid
+    # write conflicts when RTR and FDR run concurrently (both have an
+    # operation named 'extract_dataset_references' in step 'extract').
+    active: dict[str, tuple[str, Any]] = {}
     if not args.skip_rtr:
-        print("[stage 2a/5] Running DocETL RTR pipeline")
-        try:
-            summaries["rtr"] = run_pipeline(
+        active["rtr"] = (
+            "DocETL RTR",
+            lambda: run_pipeline(
                 input_path=processed,
                 output_path=rtr_pred,
                 pipeline_yaml=rtr_pipeline,
                 model=model,
+                intermediate_dir=proc_base / ".docetl_cache_rtr",
                 cost_settings=cost_cfg,
-            )
-            print(json.dumps(summaries["rtr"], indent=2))
-        except Exception:
-            print("  RTR run failed:")
-            traceback.print_exc()
-    else:
-        print("[stage 2a/5] RTR skipped (--skip-rtr)")
-
-    # ── Stage 2b: FDR pipeline ─────────────────────────────────────────────
+            ),
+        )
     if not args.skip_fdr:
-        print("[stage 2b/5] Running DocETL FDR pipeline")
-        try:
-            summaries["fdr"] = run_pipeline(
+        active["fdr"] = (
+            "DocETL FDR",
+            lambda: run_pipeline(
                 input_path=processed,
                 output_path=fdr_pred,
                 pipeline_yaml=fdr_pipeline,
                 model=model,
+                intermediate_dir=proc_base / ".docetl_cache_fdr",
                 cost_settings=cost_cfg,
-            )
-            print(json.dumps(summaries["fdr"], indent=2))
-        except Exception:
-            print("  FDR run failed:")
-            traceback.print_exc()
-    else:
-        print("[stage 2b/5] FDR skipped (--skip-fdr)")
-
-    # ── Stage 3: DataGatherer baseline ────────────────────────────────────
+            ),
+        )
     if not args.skip_datagatherer:
-        print("[stage 3/5] Running DataGatherer baseline")
-        try:
-            summaries["dg"] = run_datagatherer(processed, dg_pred)
-            print(json.dumps(summaries["dg"], indent=2))
-        except Exception:
-            print("  DataGatherer run failed:")
-            traceback.print_exc()
-    else:
+        active["dg"] = (
+            "DataGatherer",
+            lambda: run_datagatherer(processed, dg_pred),
+        )
+
+    if args.skip_rtr:
+        print("[stage 2a/5] RTR skipped (--skip-rtr)")
+    if args.skip_fdr:
+        print("[stage 2b/5] FDR skipped (--skip-fdr)")
+    if args.skip_datagatherer:
         print("[stage 3/5] DataGatherer skipped (--skip-datagatherer)")
+
+    if active:
+        running = ", ".join(label for label, _ in active.values())
+        print(f"[stages 2-3/5] Running in parallel: {running}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as pool:
+            futures = {pool.submit(fn): (key, label) for key, (label, fn) in active.items()}
+            for future in concurrent.futures.as_completed(futures):
+                key, label = futures[future]
+                try:
+                    summaries[key] = future.result()
+                    print(f"\n[{label}] done:")
+                    print(json.dumps(summaries[key], indent=2))
+                except Exception:
+                    print(f"\n[{label}] FAILED:")
+                    traceback.print_exc()
 
     # ── Stage 4: Evaluate ─────────────────────────────────────────────────
     gt_path = args.groundtruth
