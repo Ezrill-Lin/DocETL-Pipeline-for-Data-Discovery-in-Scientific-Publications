@@ -133,9 +133,10 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     headless = not args.no_headless
-    # Default output directory is format-specific so XML and PDF stay separate.
+    # Default output directory is data/raw/exp/ regardless of format (the
+    # preprocessor handles mixed XML+PDF in the same directory).
     if args.out_dir is None:
-        args.out_dir = RAW_BASE / ("pdf" if args.pdf else "xml")
+        args.out_dir = RAW_BASE / "exp"
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     entries = _load_gt_urls(args.groundtruth)

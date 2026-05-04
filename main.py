@@ -5,11 +5,11 @@ benchmark), the report is still generated from whatever results exist.
 
 Examples
 --------
-    uv run python main.py                     # XML papers, all stages
-    uv run python main.py --format pdf        # PDF papers, all stages
-    uv run python main.py --skip-datagatherer # skip DataGatherer baseline
-    uv run python main.py --skip-rtr          # FDR only
-    uv run python main.py --skip-fdr          # RTR only
+    uv run python main.py                          # EXP benchmark, XML, all stages
+    uv run python main.py --benchmark rev          # REV benchmark, all stages
+    uv run python main.py --benchmark exp --format pdf   # EXP benchmark, PDF source
+    uv run python main.py --benchmark rev --skip-datagatherer
+    uv run python main.py --benchmark exp --skip-fetch --skip-preprocess
 """
 from __future__ import annotations
 
@@ -52,6 +52,12 @@ def _fetch_papers(gt_path: Path, out_dir: Path, pdf: bool = False) -> int:
     return mod.main(argv)
 
 
+def _fetch_rev_papers(gt_path: Path, out_dir: Path) -> int:
+    mod = _load_script("fetch_rev_papers")
+    argv = ["--gt", str(gt_path), "--out-dir", str(out_dir)]
+    return mod.main(argv)
+
+
 def _load_settings() -> dict:
     p = REPO_ROOT / "config" / "settings.yaml"
     return yaml.safe_load(p.read_text(encoding="utf-8")) if p.exists() else {}
@@ -77,29 +83,49 @@ def main(argv: list[str] | None = None) -> int:
 
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--benchmark", choices=["exp", "rev"], default="exp",
+                   help="Which benchmark to run against: exp (EXP_groundtruth, default) "
+                        "or rev (Full_REV_dataset / REV_sample_groundtruth)")
     p.add_argument("--format", choices=["xml", "pdf"], default="xml",
-                   help="Source paper format: xml (default) or pdf")
+                   help="EXP-only: source paper format to download (default: xml). "
+                        "Ignored when --benchmark rev.")
+    p.add_argument("--raw-dir", type=Path, default=None,
+                   help="Override the raw papers directory. Disables auto-fetch.")
     p.add_argument("--groundtruth", type=Path, default=None,
-                   help="Benchmark CSV for evaluation (auto-detected from settings if omitted)")
+                   help="Override the benchmark file used for evaluation.")
     p.add_argument("--model", default=None,
-                   help="LLM model for DocETL pipelines (overrides settings.yaml, e.g. gpt-4o-mini)")
+                   help="LLM model for DocETL pipelines (overrides settings.yaml)")
     p.add_argument("--skip-preprocess", action="store_true",
-                   help="Skip preprocessing and reuse existing papers.json")
+                   help="Skip preprocessing; reuse existing papers.json")
+    p.add_argument("--skip-fetch", action="store_true",
+                   help="Skip auto-fetching benchmark and raw papers")
     p.add_argument("--skip-rtr", action="store_true", help="Skip RTR pipeline")
     p.add_argument("--skip-fdr", action="store_true", help="Skip FDR pipeline")
     p.add_argument("--skip-datagatherer", action="store_true", help="Skip DataGatherer baseline")
-    p.add_argument("--skip-fetch", action="store_true",
-                   help="Skip auto-fetching benchmark and raw papers")
 
     args = p.parse_args(argv)
 
-    # Derive all paths from settings + format; nothing is hardcoded in the CLI.
+    # ── Derive paths from --benchmark ─────────────────────────────────────
     raw_base  = REPO_ROOT / paths.get("raw_dir", "data/raw")
     proc_base = REPO_ROOT / paths.get("processed_dir", "data/processed")
     pred_base = REPO_ROOT / paths.get("predictions_dir", "data/predictions")
-    fmt = args.format
+    bm_dir    = REPO_ROOT / paths.get("benchmark_dir", "data/benchmark")
 
-    raw_dir     = raw_base / fmt
+    # Ground-truth file auto-selected by benchmark
+    _gt_defaults = {
+        "exp": bm_dir / "EXP_groundtruth.csv",
+        "rev": bm_dir / "REV_sample_groundtruth.csv",
+    }
+    # Parquet for REV fetch
+    _rev_parquet = bm_dir / "Full_REV_dataset_citation_records_Table.parquet"
+
+    gt_path = Path(args.groundtruth) if args.groundtruth else _gt_defaults[args.benchmark]
+
+    # raw_dir: --raw-dir > benchmark default
+    if args.raw_dir is not None:
+        raw_dir = REPO_ROOT / args.raw_dir if not Path(args.raw_dir).is_absolute() else Path(args.raw_dir)
+    else:
+        raw_dir = raw_base / args.benchmark   # data/raw/exp/  or  data/raw/rev/
     processed   = proc_base / "papers.json"
     rtr_pred    = pred_base / "rtr_predictions.jsonl"
     fdr_pred    = pred_base / "fdr_predictions.jsonl"
@@ -121,47 +147,53 @@ def main(argv: list[str] | None = None) -> int:
     summaries: dict[str, dict | None] = {"rtr": None, "fdr": None, "dg": None}
 
     # ── Stage 0: Auto-download benchmark + raw papers ─────────────────────
-    benchmark_dir = REPO_ROOT / paths.get("benchmark_dir", "data/benchmark")
-    # Determine which GT file we expect
-    expected_gt = (
-        Path(args.groundtruth) if args.groundtruth
-        else REPO_ROOT / list(eval_cfg.get("benchmark_files", {"exp": "data/benchmark/EXP_groundtruth.csv"}).values())[0]
-    )
-    if not args.skip_fetch:
-        # Download benchmark if missing
-        if not expected_gt.exists():
-            print("[stage 0/5] Downloading benchmark ground truth from Zenodo...")
+    if args.skip_fetch or args.raw_dir is not None:
+        reason = "--raw-dir set" if args.raw_dir is not None else "--skip-fetch set"
+        print(f"[stage 0/5] {reason}; skipping auto-download.")
+    else:
+        # Download benchmark files if missing
+        if not gt_path.exists():
+            print("[stage 0/5] Downloading benchmark files from Zenodo...")
             try:
                 _download_benchmarks()
             except Exception:
                 print("  [warn] Benchmark download failed — evaluation will be skipped.")
                 traceback.print_exc()
         else:
-            print(f"[stage 0/5] Benchmark already present at {expected_gt}")
+            print(f"[stage 0/5] Benchmark already present at {gt_path}")
 
-        # Fetch raw papers if raw_dir/<fmt> is empty
-        raw_dir_check = raw_base / fmt
-        expected_suffix = ".pdf" if fmt == "pdf" else ".xml"
-        has_papers = raw_dir_check.exists() and any(
-            f for f in raw_dir_check.iterdir()
-            if f.suffix == expected_suffix and f.stat().st_size > 100
-        ) if raw_dir_check.exists() else False
-        if not has_papers and expected_gt.exists():
-            print(f"[stage 0/5] No raw {fmt.upper()} papers found in {raw_dir_check} — fetching...")
-            if fmt == "pdf":
-                print("  (PDF mode: using browser automation via Playwright)")
-            raw_dir_check.mkdir(parents=True, exist_ok=True)
-            try:
-                _fetch_papers(expected_gt, raw_dir_check, pdf=(fmt == "pdf"))
-            except Exception:
-                print("  [warn] Paper fetch failed — pipeline will abort at preprocessing.")
-                traceback.print_exc()
-        elif not has_papers:
-            print("  [warn] No raw papers and no ground truth to fetch from — skipping fetch.")
+        # Fetch raw papers if raw_dir is empty
+        has_papers = (
+            raw_dir.exists()
+            and any(f for f in raw_dir.iterdir()
+                    if f.suffix.lower() in {".xml", ".pdf", ".html", ".htm"}
+                    and f.stat().st_size > 100)
+        ) if raw_dir.exists() else False
+
+        if not has_papers:
+            raw_dir.mkdir(parents=True, exist_ok=True)
+            if args.benchmark == "exp":
+                fmt = args.format
+                print(f"[stage 0/5] Fetching EXP papers ({fmt.upper()}) into {raw_dir} …")
+                if fmt == "pdf":
+                    print("  (PDF mode: using browser automation via Playwright)")
+                try:
+                    _fetch_papers(gt_path, raw_dir, pdf=(fmt == "pdf"))
+                except Exception:
+                    print("  [warn] Paper fetch failed — pipeline may abort at preprocessing.")
+                    traceback.print_exc()
+            else:  # rev
+                if not _rev_parquet.exists():
+                    print("  [warn] REV parquet not found — run download_benchmarks first.")
+                else:
+                    print(f"[stage 0/5] Fetching REV sample papers into {raw_dir} …")
+                    try:
+                        _fetch_rev_papers(gt_path, raw_dir)
+                    except Exception:
+                        print("  [warn] REV paper fetch failed — pipeline may abort at preprocessing.")
+                        traceback.print_exc()
         else:
-            print(f"[stage 0/5] Raw {fmt.upper()} papers already present in {raw_dir_check}")
-    else:
-        print("[stage 0/5] --skip-fetch set; skipping auto-download.")
+            print(f"[stage 0/5] Raw papers already present in {raw_dir}")
 
     # ── Stage 1: Preprocess ────────────────────────────────────────────────
     print("[stage 1/5] Preprocessing papers")
@@ -237,14 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                     traceback.print_exc()
 
     # ── Stage 4: Evaluate ─────────────────────────────────────────────────
-    gt_path = args.groundtruth
-    if gt_path is None:
-        for candidate in eval_cfg.get("benchmark_files", {}).values():
-            cp = REPO_ROOT / candidate
-            if cp.exists():
-                gt_path = cp
-                break
-    if gt_path and Path(gt_path).exists():
+    if gt_path.exists():
         print(f"[stage 4/5] Evaluating against {gt_path}")
         _run_evaluate(rtr_pred, gt_path, metrics["rtr"], "rtr")
         _run_evaluate(fdr_pred, gt_path, metrics["fdr"], "fdr")
