@@ -37,6 +37,8 @@ def evaluate(
     groundtruth_path: Path,
     output_path: Path | None = None,
     label: str = "docetl",
+    model: str = "",
+    benchmark: str = "",
 ) -> dict[str, Any]:
     predictions = _load_predictions(predictions_path)
     groundtruth = load_groundtruth(groundtruth_path)
@@ -46,6 +48,8 @@ def evaluate(
 
     summary = {
         "label": label,
+        "model": model,
+        "benchmark": benchmark,
         "predictions_path": str(predictions_path),
         "groundtruth_path": str(groundtruth_path),
         "pair_micro": micro_metrics(pair_match),

@@ -2,11 +2,37 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 
-def _maybe_load(path: Path) -> dict[str, Any] | None:
+# ── Display helpers ───────────────────────────────────────────────────────────
+
+_BENCHMARK_DISPLAY = {"exp": "DataRef-EXP", "rev": "DataRef-REV"}
+_METHOD_DISPLAY = {
+    "rtr":              "DocETL RTR",
+    "fdr":              "DocETL FDR",
+    "datagatherer_rtr": "DG-RTR",
+    "datagatherer_fdr": "DG-FDR",
+}
+_METHOD_ORDER = ["rtr", "fdr", "datagatherer_rtr", "datagatherer_fdr"]
+_BENCHMARK_ORDER = ["exp", "rev"]
+
+# Columns for the unified matrix table: (metrics_key, sub_key, header)
+_MATRIX_COLS: list[tuple[str, str, str]] = [
+    ("pair_micro",   "precision", "Pair Precision"),
+    ("pair_micro",   "recall",    "Pair Recall"),
+    ("pair_micro",   "f1",        "Pair F1"),
+    ("triple_micro", "precision", "Triple Precision"),
+    ("triple_micro", "recall",    "Triple Recall"),
+    ("triple_micro", "f1",        "Triple F1"),
+]
+
+
+def _maybe_load(path: Path | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
     p = Path(path)
     if not p.exists():
         return None
@@ -16,17 +42,108 @@ def _maybe_load(path: Path) -> dict[str, Any] | None:
         return None
 
 
-def _metrics_table(metrics: dict[str, Any] | None, label: str) -> str:
+def _display_model(model: str) -> str:
+    """Strip LiteLLM provider prefix for compact display.
+
+    'gemini/gemini-2.5-flash' -> 'gemini-2.5-flash'
+    'openai/gpt-4o-mini'      -> 'gpt-4o-mini'
+    'gpt-4o-mini'             -> 'gpt-4o-mini'
+    """
+    return model.split("/", 1)[1] if "/" in model else model
+
+
+def _parse_metrics_filename(stem: str) -> tuple[str, str, str] | None:
+    """Parse '{benchmark}_{safe_model}_{method}' -> (benchmark, safe_model, method) or None."""
+    # Check compound suffixes first so 'datagatherer_rtr'/'datagatherer_fdr' beat plain 'rtr'/'fdr'
+    for method in ("datagatherer_rtr", "datagatherer_fdr", "fdr", "rtr"):
+        if stem.endswith(f"_{method}"):
+            prefix = stem[: -len(f"_{method}")]
+            for bm in _BENCHMARK_ORDER:
+                if prefix.startswith(f"{bm}_"):
+                    return bm, prefix[len(f"{bm}_"):], method
+    return None
+
+
+def _fmt(v: Any) -> str:
+    if isinstance(v, float):
+        return f"{v:.4f}"
+    return "-" if v is None else str(v)
+
+
+# ── Matrix table ──────────────────────────────────────────────────────────────
+
+def _build_matrix_table(all_metrics: list[dict[str, Any]]) -> str:
+    """Build the Dataset × Model × Method comparison table with bold best-per-group values."""
+    if not all_metrics:
+        return "_No metrics available yet._\n"
+
+    # Group by (benchmark, model)
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for m in all_metrics:
+        groups[(m.get("benchmark", ""), m.get("model", ""))].append(m)
+
+    def _group_key(k: tuple[str, str]) -> tuple[int, str]:
+        bm, model = k
+        return (_BENCHMARK_ORDER.index(bm) if bm in _BENCHMARK_ORDER else 99, model)
+
+    headers = ["Dataset", "Model", "Method"] + [hdr for _, _, hdr in _MATRIX_COLS]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "|" + "---|" * len(headers),
+    ]
+
+    for gkey in sorted(groups.keys(), key=_group_key):
+        bm, model = gkey
+        group = sorted(
+            groups[gkey],
+            key=lambda m: (
+                _METHOD_ORDER.index(m.get("label", ""))
+                if m.get("label") in _METHOD_ORDER
+                else 99
+            ),
+        )
+
+        # Find best value per metric column within this (dataset, model) group for bolding
+        best: dict[tuple[str, str], float] = {}
+        for sect, key, _ in _MATRIX_COLS:
+            nums = [
+                v for m in group
+                if isinstance(v := m.get(sect, {}).get(key), (int, float))
+            ]
+            if nums:
+                best[(sect, key)] = max(nums)
+
+        dataset_display = _BENCHMARK_DISPLAY.get(bm, bm.upper())
+        model_display = _display_model(model)
+
+        for row in group:
+            method_key = row.get("label", "")
+            method_display = _METHOD_DISPLAY.get(method_key, method_key.upper())
+            cells = [dataset_display, model_display, method_display]
+            for sect, key, _ in _MATRIX_COLS:
+                v = row.get(sect, {}).get(key)
+                s = _fmt(v)
+                if isinstance(v, (int, float)) and best.get((sect, key)) == v:
+                    s = f"**{s}**"
+                cells.append(s)
+            lines.append("| " + " | ".join(cells) + " |")
+
+    return "\n".join(lines) + "\n"
+
+
+# ── Per-run detail sections ───────────────────────────────────────────────────
+
+def _detail_table(metrics: dict[str, Any] | None, label: str) -> str:
     if not metrics:
         return f"_No metrics available for {label}._\n"
+    pm = metrics.get("pair_micro", {})
+    tm = metrics.get("triple_micro", {})
     lines = [
         f"#### {label}",
         "",
         "| Metric | Pair (paper, dataset_id) | Triple (paper, dataset_id, repository) |",
         "|---|---|---|",
     ]
-    pm = metrics.get("pair_micro", {})
-    tm = metrics.get("triple_micro", {})
     for key in ("precision", "recall", "f1", "tp", "fp", "fn"):
         lines.append(f"| {key} | {pm.get(key, '-')} | {tm.get(key, '-')} |")
     lines.append("")
@@ -39,13 +156,19 @@ def _metrics_table(metrics: dict[str, Any] | None, label: str) -> str:
     )
     cov = metrics.get("coverage", {})
     if cov:
-        lines.append("")
-        lines.append("Coverage:")
-        lines.append(f"- Papers with at least one prediction: {cov.get('n_papers_with_prediction', 0)}")
-        lines.append(f"- Papers with at least one ground-truth ref: {cov.get('n_papers_with_groundtruth', 0)}")
-        lines.append(f"- Empty outputs: {cov.get('n_empty_outputs', 0)}")
-        lines.append(f"- Total predictions: {cov.get('n_total_predictions', 0)}")
-        lines.append(f"- Total ground-truth refs: {cov.get('n_total_groundtruth', 0)}")
+        cov_lines = [
+            "",
+            "Coverage:",
+            f"- Papers with at least one prediction: {cov.get('n_papers_with_prediction', 0)}",
+            f"- Papers with at least one ground-truth ref: {cov.get('n_papers_with_groundtruth', 0)}",
+            f"- Empty outputs: {cov.get('n_empty_outputs', 0)}",
+        ]
+        if "n_real_predictions" in cov:
+            cov_lines.append(f"- Real predictions (non-N/A): {cov['n_real_predictions']}")
+            cov_lines.append(f"- N/A placeholder rows: {cov['n_na_predictions']}")
+        cov_lines.append(f"- Total predictions: {cov.get('n_total_predictions', 0)}")
+        cov_lines.append(f"- Total ground-truth refs: {cov.get('n_total_groundtruth', 0)}")
+        lines.extend(cov_lines)
     lines.append("")
     return "\n".join(lines)
 
@@ -65,15 +188,19 @@ def _failure_examples(metrics: dict[str, Any] | None, k: int = 5) -> str:
     return "\n".join(out) + "\n"
 
 
+# ── Main entry point ──────────────────────────────────────────────────────────
+
 def generate_report(
-    rtr_metrics_path: Path,
-    fdr_metrics_path: Path,
-    datagatherer_metrics_path: Path | None,
-    rtr_run_summary: dict[str, Any] | None,
-    fdr_run_summary: dict[str, Any] | None,
-    datagatherer_run_summary: dict[str, Any] | None,
-    output_path: Path,
-    # Legacy aliases so callers that pass docetl_metrics_path still work
+    metrics_dir: Path | None = None,
+    run_summaries: list[dict[str, Any]] | None = None,
+    output_path: Path = Path("outputs/report.md"),
+    # Legacy single-path params kept for backward compatibility
+    rtr_metrics_path: Path | None = None,
+    fdr_metrics_path: Path | None = None,
+    datagatherer_metrics_path: Path | None = None,
+    rtr_run_summary: dict[str, Any] | None = None,
+    fdr_run_summary: dict[str, Any] | None = None,
+    datagatherer_run_summary: dict[str, Any] | None = None,
     docetl_metrics_path: Path | None = None,
     docetl_run_summary: dict[str, Any] | None = None,
 ) -> Path:
@@ -83,143 +210,108 @@ def generate_report(
     if docetl_run_summary is not None:
         rtr_run_summary = docetl_run_summary
 
-    rtr_m = _maybe_load(rtr_metrics_path)
-    fdr_m = _maybe_load(fdr_metrics_path)
-    dg_m = _maybe_load(datagatherer_metrics_path) if datagatherer_metrics_path else None
+    # ── Collect all metrics ───────────────────────────────────────────────────
+    all_metrics: list[dict[str, Any]] = []
 
-    parts: list[str] = []
-    parts.append("# Dataset Reference Extraction — RTR vs FDR vs DataGatherer\n")
-    parts.append(
-        "## 1. Project overview\n"
-        "This project builds a DocETL pipeline that extracts dataset references "
-        "from scientific papers and evaluates it on the DataRef-EXP / DataRef-REV "
-        "benchmarks released by the DataGatherer authors. DataGatherer is run as "
-        "an optional baseline.\n"
-    )
-    parts.append(
-        "## 2. Pipeline architecture\n"
-        "Inputs (HTML/JATS XML/PDF) are converted to structured paper records by "
-        "`src/preprocess/`. Each record carries the section tree, the abstract, "
-        "and a `candidate_passages` field — pre-selected passages where dataset "
-        "references most often appear (data availability, methods, supplementary, "
-        "figure captions, plus any paragraph mentioning a known repository or an "
-        "accession-shaped token).\n\n"
-        "DocETL Stage 1 is a single `map` operation that asks the LLM to return a "
-        "list of `{dataset_identifier, repository, evidence, confidence, notes}` "
-        "objects. The prompt enumerates known repositories and identifier "
-        "patterns and forbids URL invention.\n\n"
-        "DocETL Stage 2 is **deterministic Python** in "
-        "`src/extraction/url_builder.py`: identifier normalization → repository "
-        "alias resolution → URL templating from `config/repositories.yaml`. If "
-        "the URL pattern is unknown, the URL field is left empty rather than "
-        "fabricated.\n"
-    )
-    parts.append(
-        "## 3. Why hybrid section retrieval + LLM extraction\n"
-        "Pure heading-based extraction misses datasets cited inline (\"deposited "
-        "into PRIDE under PXD012345\" buried in Methods) and figure captions. "
-        "Pure LLM-on-full-text is wasteful — most papers' bodies are irrelevant "
-        "to data availability. We retrieve passages by both heading match and a "
-        "permissive regex over repository names and accession-shaped tokens; the "
-        "LLM then resolves ambiguity (e.g. distinguishing a primary deposit from "
-        "a re-used public dataset) on a much smaller prompt.\n"
-    )
-    parts.append(
-        "## 4. Output schema\n"
-        "Each predicted row is JSONL with fields: `paper_id`, `paper_doi`, "
-        "`pmcid`, `pmid`, `dataset_identifier`, `repository`, `url`, `evidence`, "
-        "`confidence`, `notes`.\n"
-    )
-    parts.append(
-        "## 5. Evaluation dataset\n"
-        "Ground truth comes from DataRef-EXP and/or DataRef-REV "
-        "(https://doi.org/10.5281/zenodo.15549086). Loaders in "
-        "`src/evaluation/load_groundtruth.py` accept CSV/TSV/JSON/JSONL and try a "
-        "list of column-name candidates per field. Identifier and repository "
-        "values are normalized identically for predictions and ground truth.\n"
-    )
-
-    parts.append("## 6. Metrics — DocETL RTR (Retrieve-Then-Read)\n")
-    parts.append(_metrics_table(rtr_m, "DocETL RTR"))
-    parts.append(_failure_examples(rtr_m))
-
-    parts.append("## 7. Metrics — DocETL FDR (Full-Document Read)\n")
-    parts.append(_metrics_table(fdr_m, "DocETL FDR"))
-    parts.append(_failure_examples(fdr_m))
-
-    parts.append("## 8. Metrics — DataGatherer (baseline)\n")
-    if dg_m is None:
-        parts.append("_DataGatherer baseline metrics not available._\n")
+    if metrics_dir is not None:
+        for p in sorted(Path(metrics_dir).glob("*.json")):
+            m = _maybe_load(p)
+            if m is None:
+                continue
+            # Back-fill benchmark/model from filename if the JSON predates those fields
+            if not m.get("benchmark") or not m.get("model"):
+                parsed = _parse_metrics_filename(p.stem)
+                if parsed:
+                    bm, safe_model, method = parsed
+                    m.setdefault("benchmark", bm)
+                    m.setdefault("label", method)
+                    if not m.get("model"):
+                        m["model"] = safe_model  # best we can do without the original string
+            all_metrics.append(m)
     else:
-        parts.append(_metrics_table(dg_m, "DataGatherer"))
-        parts.append(_failure_examples(dg_m))
-
-    # Three-way comparison table
-    parts.append("## 9. Comparison\n")
-    rows_available = [m for m in [(rtr_m, "DocETL RTR"), (fdr_m, "DocETL FDR"), (dg_m, "DataGatherer")] if m[0]]
-    if len(rows_available) >= 2:
-        header = "| Aspect | " + " | ".join(label for _, label in rows_available) + " |"
-        sep    = "|---|" + "---|" * len(rows_available)
-        def _val(m, *keys):
-            v = m
-            for k in keys:
-                v = (v or {}).get(k, "-")
-            return v
-        table_lines = [header, sep]
-        for aspect, *keys in [
-            ("Pair precision",  "pair_micro",   "precision"),
-            ("Pair recall",     "pair_micro",   "recall"),
-            ("Pair F1 (micro)", "pair_micro",   "f1"),
-            ("Triple F1 (micro)", "triple_micro", "f1"),
-            ("Pair F1 (macro)", "pair_macro",   "f1"),
-            ("Papers covered",  "coverage",     "n_papers_with_prediction"),
-            ("Total predictions", "coverage",   "n_total_predictions"),
+        # Legacy fallback: explicit per-path args
+        for path, label in [
+            (rtr_metrics_path, "rtr"),
+            (fdr_metrics_path, "fdr"),
+            (datagatherer_metrics_path, "datagatherer"),
         ]:
-            vals = " | ".join(str(_val(m, *keys)) for m, _ in rows_available)
-            table_lines.append(f"| {aspect} | {vals} |")
-        parts.append("\n".join(table_lines) + "\n")
+            m = _maybe_load(path)
+            if m:
+                m.setdefault("label", label)
+                m.setdefault("model", "unknown")
+                m.setdefault("benchmark", "exp")
+                all_metrics.append(m)
+
+    # ── Build report sections ─────────────────────────────────────────────────
+    parts: list[str] = []
+
+    parts.append("# Dataset Reference Extraction — Results\n")
+
+    # ── Section 1: Unified comparison table ──────────────────────────────────
+    parts.append(
+        "## 1. Unified Comparison\n\n"
+        "Bold = best within each Dataset × Model group.\n"
+        "Pair = (paper_id, dataset_identifier); Triple = (paper_id, dataset_identifier, repository).\n"
+    )
+    parts.append(_build_matrix_table(all_metrics))
+
+    # ── Section 2: Per-run detailed metrics ───────────────────────────────────
+    parts.append("## 2. Detailed Metrics per Run\n")
+
+    # Group by (benchmark, model) then iterate methods in order
+    by_bm_model: dict[tuple[str, str], dict[str, dict[str, Any]]] = defaultdict(dict)
+    for m in all_metrics:
+        bm = m.get("benchmark", "")
+        model = m.get("model", "")
+        method = m.get("label", "")
+        by_bm_model[(bm, model)][method] = m
+
+    def _bm_model_key(k: tuple[str, str]) -> tuple[int, str]:
+        bm, model = k
+        return (_BENCHMARK_ORDER.index(bm) if bm in _BENCHMARK_ORDER else 99, model)
+
+    for (bm, model) in sorted(by_bm_model.keys(), key=_bm_model_key):
+        ds_display = _BENCHMARK_DISPLAY.get(bm, bm.upper())
+        m_display = _display_model(model)
+        parts.append(f"### {ds_display} | {m_display}\n")
+        method_map = by_bm_model[(bm, model)]
+        for method in _METHOD_ORDER:
+            met = method_map.get(method)
+            section_label = f"{ds_display} — {m_display} — {_METHOD_DISPLAY.get(method, method.upper())}"
+            parts.append(_detail_table(met, section_label))
+            parts.append(_failure_examples(met))
+
+    # ── Section 8: Cost / runtime ─────────────────────────────────────────────
+    cost_lines: list[str] = []
+    if run_summaries:
+        for entry in run_summaries:
+            bm = entry.get("benchmark", "")
+            model = entry.get("model", "")
+            prefix = f"{_BENCHMARK_DISPLAY.get(bm, bm.upper())} | {_display_model(model)}"
+            for method_key, label_key in [
+                    ("rtr",    "rtr"),
+                    ("fdr",    "fdr"),
+                    ("dg_rtr", "datagatherer_rtr"),
+                    ("dg_fdr", "datagatherer_fdr"),
+                ]:
+                s = entry.get(method_key)
+                if s:
+                    method_label = _METHOD_DISPLAY.get(label_key, label_key.upper())
+                    cost_lines.append(
+                        f"- {prefix} | {method_label}: {json.dumps(s.get('cost', s))}"
+                    )
     else:
-        parts.append("Side-by-side metrics will appear here once both runs are completed.\n")
+        # Legacy fallback
+        for label, summary in [
+            ("RTR", rtr_run_summary),
+            ("FDR", fdr_run_summary),
+            ("DataGatherer", datagatherer_run_summary),
+        ]:
+            if summary:
+                cost_lines.append(f"- {label}: {json.dumps(summary.get('cost', summary))}")
 
-    cost_lines = []
-    for label, summary in [("RTR", rtr_run_summary), ("FDR", fdr_run_summary), ("DataGatherer", datagatherer_run_summary)]:
-        if summary:
-            cost_lines.append(f"- {label}: {json.dumps(summary.get('cost', summary))}")
     if cost_lines:
-        parts.append("\n**Cost / runtime:**\n" + "\n".join(cost_lines) + "\n")
-
-    parts.append(
-        "\n**Engineering effort:** both DocETL strategies are defined in YAML files "
-        "plus deterministic post-processing. RTR uses pre-filtered candidate passages "
-        "(cheaper, faster); FDR passes the full document to a large-context model "
-        "(higher recall, higher cost). Iterating on the prompt or passage selector "
-        "requires no Python rewrite. DataGatherer is a more specialized pipeline — "
-        "strong defaults, less flexibility per change.\n"
-    )
-
-    parts.append(
-        "## 10. Failure analysis\n"
-        "See the failure-example sections above. Common categories:\n"
-        "- **missed_identifier** — accession buried in a non-canonical section "
-        "(e.g. References) or stated only in a supplementary file we did not "
-        "download.\n"
-        "- **hallucinated_identifier** — the LLM repeated an identifier from a "
-        "tool/method citation rather than the paper's own data deposit.\n"
-        "- **wrong_repository** — repository name absent in text and the prefix "
-        "is ambiguous (DOIs in Zenodo vs Figshare vs Dryad).\n"
-        "- **incomplete_identifier** — truncation when the accession spans a "
-        "PDF line break.\n"
-    )
-
-    parts.append(
-        "## 11. Reflection: RTR vs FDR vs specialized tools\n"
-        "RTR trades recall for efficiency: it never misses a dataset that appears "
-        "in a passage matched by the retrieval heuristic, but can miss ones buried "
-        "in unexpected sections. FDR with a large-context model (Gemini 2.5 Flash, "
-        "1M token window) sees the full text, improving recall at higher API cost. "
-        "DataGatherer encodes more domain knowledge but is harder to retarget. "
-        "The right choice depends on cost tolerance and the diversity of paper formats.\n"
-    )
+        parts.append("\n## 3. Cost / Runtime\n\n" + "\n".join(cost_lines) + "\n")
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -4,6 +4,8 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from ..extraction.registry import is_na_identifier
+
 
 def prf1(tp: int, fp: int, fn: int) -> dict[str, float]:
     p = tp / (tp + fp) if (tp + fp) else 0.0
@@ -51,7 +53,9 @@ def macro_metrics(match_result: dict[str, Any]) -> dict[str, float]:
 
 
 def coverage(predictions: list[dict[str, Any]], groundtruth: list[dict[str, Any]]) -> dict[str, int]:
-    pred_papers = {r.get("paper_id", "") for r in predictions if r.get("dataset_identifier")}
+    real_preds = [r for r in predictions if not is_na_identifier(r.get("dataset_identifier"))]
+    na_preds = [r for r in predictions if is_na_identifier(r.get("dataset_identifier")) and r.get("paper_id")]
+    pred_papers = {r.get("paper_id", "") for r in real_preds}
     gt_papers = {r.get("paper_id", "") for r in groundtruth if r.get("dataset_identifier")}
     empty_outputs = sum(
         1 for r in predictions if not r.get("dataset_identifier")
@@ -61,6 +65,8 @@ def coverage(predictions: list[dict[str, Any]], groundtruth: list[dict[str, Any]
         "n_papers_with_groundtruth": len(gt_papers),
         "n_empty_outputs": empty_outputs,
         "n_total_predictions": len(predictions),
+        "n_real_predictions": len(real_preds),
+        "n_na_predictions": len(na_preds),
         "n_total_groundtruth": len(groundtruth),
     }
 
