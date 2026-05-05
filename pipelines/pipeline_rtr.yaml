@@ -141,6 +141,40 @@ operations:
       identifier — do not duplicate the same accession under two
       repository labels.
 
+      Examples — these are illustrative only. The identifiers below
+      ("PXD012345", "CCLE_DepMap_19Q1_maf.txt", etc.) MUST NOT appear in
+      your output unless they appear verbatim in the candidate passages
+      above. They demonstrate the output shape and judgment calls, not
+      content to copy.
+
+      ── Example A: identifier + repository both explicit ──
+      Passage: "Proteomics data have been deposited to PRIDE under accession PXD012345."
+      Emit one row:
+        dataset_identifier: "PXD012345"
+        repository: "PRIDE"
+        evidence: "deposited to PRIDE under accession PXD012345"
+        confidence: "high"
+        notes: ""
+
+      ── Example B: filename + release tag, no parent accession ──
+      Passage: "Mutation calls were downloaded from DepMap (release 19Q1; file CCLE_DepMap_19Q1_maf.txt)."
+      Do NOT emit "CCLE_DepMap_19Q1_maf.txt" or "19Q1" as a dataset_identifier.
+      Emit one N/A row instead:
+        dataset_identifier: "N/A"
+        repository: "DepMap"
+        evidence: "downloaded from DepMap (release 19Q1; file CCLE_DepMap_19Q1_maf.txt)"
+        confidence: "low"
+        notes: "release tag and filename only; no parent accession in passage"
+
+      ── Example C: repository named in prose, not in a parenthetical ──
+      Passage: "RNA-seq reads were deposited in the Gene Expression Omnibus under accession GSE150316."
+      Emit one row:
+        dataset_identifier: "GSE150316"
+        repository: "GEO"
+        evidence: "deposited in the Gene Expression Omnibus under accession GSE150316"
+        confidence: "high"
+        notes: ""
+
       Always copy paper_id, paper_doi, pmcid, pmid into your response
       verbatim from the values above.
     validate:

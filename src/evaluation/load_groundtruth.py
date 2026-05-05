@@ -34,7 +34,10 @@ COLUMN_CANDIDATES = {
     "repository": [
         "repository", "repo", "database", "source", "data_repository",
     ],
-    "url": ["url", "URL", "link"],
+    # dataset_webpage is the dataset-specific URL (preferred); repo_link is
+    # the generic repository landing page (fallback). Both appear in the
+    # DataRef-EXP CSV.
+    "url": ["url", "URL", "link", "dataset_webpage", "dataset_url", "repo_link"],
     # Some benchmarks (e.g. DataRef-EXP) only give a citing-publication URL.
     "paper_url": [
         "citing_publication_link", "publication_link", "paper_url",

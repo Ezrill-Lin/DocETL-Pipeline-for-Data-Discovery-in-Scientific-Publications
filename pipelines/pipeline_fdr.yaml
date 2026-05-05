@@ -137,8 +137,78 @@ operations:
       output ONE row at the level of the underlying repository accession
       (e.g. the dbGaP study or SRA project that backs that release) if
       the paper names one; otherwise emit a single row with the portal
-      name as the repository and the release tag as the identifier and
-      confidence = "low".
+      name as the repository, dataset_identifier = "N/A", and
+      confidence = "low" — never the release tag itself as the identifier.
+
+      Examples — these are illustrative only. The identifiers below
+      ("PXD012345", "GSE150316", "phs003416.v1.p1", etc.) MUST NOT appear
+      in your output unless they appear verbatim in the document text
+      above. They demonstrate the output shape and judgment calls across
+      common repositories, not content to copy.
+
+      ── Example A: PRIDE / ProteomeXchange (proteomics) ──
+      Text: "Proteomics data have been deposited to PRIDE under accession PXD012345."
+      Emit one row:
+        dataset_identifier: "PXD012345"
+        repository: "PRIDE"
+        evidence: "deposited to PRIDE under accession PXD012345"
+        confidence: "high"
+        notes: ""
+
+      ── Example B: GEO (transcriptomics) ──
+      Text: "RNA-seq reads were deposited in the Gene Expression Omnibus under accession GSE150316."
+      Emit one row:
+        dataset_identifier: "GSE150316"
+        repository: "GEO"
+        evidence: "deposited in the Gene Expression Omnibus under accession GSE150316"
+        confidence: "high"
+        notes: ""
+
+      ── Example C: dbGaP (controlled-access human genomics) ──
+      Text: "Whole-genome sequences are available via dbGaP study phs003416.v1.p1."
+      Emit one row:
+        dataset_identifier: "phs003416.v1.p1"
+        repository: "dbGaP"
+        evidence: "available via dbGaP study phs003416.v1.p1"
+        confidence: "high"
+        notes: ""
+
+      ── Example D: BioProject preferred over SRA when both are named ──
+      Text: "Raw reads were submitted to NCBI under BioProject PRJNA306801 (SRA accession SRP123456)."
+      Emit ONE row at the BioProject level (do not also emit SRP123456):
+        dataset_identifier: "PRJNA306801"
+        repository: "BioProject"
+        evidence: "submitted to NCBI under BioProject PRJNA306801 (SRA accession SRP123456)"
+        confidence: "high"
+        notes: "BioProject is canonical for PRJNA* even when SRA is also named"
+
+      ── Example E: EGA (European controlled-access) ──
+      Text: "Sequencing data were deposited in the European Genome-Phenome Archive under accession EGAS00001000925."
+      Emit one row:
+        dataset_identifier: "EGAS00001000925"
+        repository: "EGA"
+        evidence: "deposited in the European Genome-Phenome Archive under accession EGAS00001000925"
+        confidence: "high"
+        notes: ""
+
+      ── Example F: MassIVE (proteomics) ──
+      Text: "Mass spectrometry data are available at MassIVE: MSV000092944."
+      Emit one row:
+        dataset_identifier: "MSV000092944"
+        repository: "MassIVE"
+        evidence: "available at MassIVE: MSV000092944"
+        confidence: "high"
+        notes: ""
+
+      ── Example G: filename + release tag, no parent accession ──
+      Text: "Mutation calls were downloaded from DepMap (release 19Q1; file CCLE_DepMap_19Q1_maf.txt)."
+      Do NOT emit "CCLE_DepMap_19Q1_maf.txt" or "19Q1" as a dataset_identifier.
+      Emit one N/A row instead:
+        dataset_identifier: "N/A"
+        repository: "DepMap"
+        evidence: "downloaded from DepMap (release 19Q1; file CCLE_DepMap_19Q1_maf.txt)"
+        confidence: "low"
+        notes: "release tag and filename only; no parent accession in text"
 
       Always copy paper_id, paper_doi, pmcid, pmid into your response
       verbatim from the values above.
