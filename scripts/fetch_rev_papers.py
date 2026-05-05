@@ -18,8 +18,7 @@ directories via rglob, so both formats can coexist in data/raw/rev/ and be
 ingested in a single preprocess pass.
 
 Usage:
-    uv run python scripts/fetch_rev_papers.py                # 100 GT papers
-    uv run python scripts/fetch_rev_papers.py --n 200 --seed 42
+    uv run python scripts/fetch_rev_papers.py                # all GT papers
     uv run python scripts/fetch_rev_papers.py --no-headless  # show browser
 """
 from __future__ import annotations
@@ -147,10 +146,6 @@ def main(argv: list[str] | None = None) -> int:
                    help="Path to REV ground-truth CSV (default: data/benchmark/REV_sample_groundtruth.csv)")
     p.add_argument("--out-dir", type=Path, default=OUT_DIR,
                    help="Output directory for downloaded papers (default: data/raw/rev/)")
-    p.add_argument("--n", type=int, default=100,
-                   help="Number of unique papers to sample (default: 100)")
-    p.add_argument("--seed", type=int, default=42,
-                   help="Random seed for reproducible sampling (default: 42)")
     p.add_argument("--workers-xml", type=int, default=3,
                    help="Concurrent workers for XML downloads (default: 3, respects NCBI limit)")
     p.add_argument("--workers-pdf", type=int, default=4,
@@ -168,20 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     headless = not args.no_headless
 
-    # ── 1. Load & sample from GT ──────────────────────────────────────────
+    # ── 1. Load all unique papers from GT ────────────────────────────────
     print(f"Loading {args.gt.name} …")
     df = pd.read_csv(args.gt)
-    unique_urls = (
+    rng = (
         df["citing_publication_link"]
         .dropna()
         .unique()
+        .tolist()
     )
-    rng = pd.Series(unique_urls).sample(
-        n=min(args.n, len(unique_urls)),
-        random_state=args.seed,
-        replace=False,
-    ).tolist()
-    print(f"Sampled {len(rng)} / {len(unique_urls)} unique papers  (seed={args.seed})")
+    print(f"Found {len(rng)} unique papers in ground truth")
 
     # ── 2. Classify each URL ──────────────────────────────────────────────
     pmc_tasks:  list[tuple[str, str, str]] = []   # (pmcid, url, label)

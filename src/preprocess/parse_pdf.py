@@ -33,6 +33,15 @@ HEADING_PATTERNS = [
                re.IGNORECASE),
 ]
 
+# Sections from which no dataset identifiers are expected.  Everything from
+# the first matched heading onward is excluded from full_text to cut tokens.
+_CUT_FROM_RE = re.compile(
+    r"^(\d+(?:\.\d+)*\s+)?(references?|bibliography|acknowledg(?:e?ments?)|"
+    r"author\s+contributions?|competing\s+interests?|conflict\s+of\s+interest|"
+    r"ethics?\s+(statement|declaration)s?|funding)\s*$",
+    re.IGNORECASE,
+)
+
 
 def _is_heading(line: str) -> bool:
     line = line.strip()
@@ -66,7 +75,8 @@ def _extract_pages(path: Path) -> list[tuple[int, str]]:
 
 def parse_pdf_file(path: Path) -> dict[str, Any]:
     pages = _extract_pages(Path(path))
-    full_text = "\n".join(text for _, text in pages)
+    # Keep raw page text for identifier (DOI/PMCID/PMID) regex extraction only.
+    _raw_full_text = "\n".join(text for _, text in pages)
 
     sections: list[dict[str, Any]] = []
     current_title = ""
@@ -97,6 +107,27 @@ def parse_pdf_file(path: Path) -> dict[str, Any]:
                 current_buf.append(line)
     flush()
 
+    # Drop References and other non-informative tail sections to shrink
+    # full_text.  We search forward to the *first* matching section and cut
+    # there; earlier sections with the same name (very rare) are kept.
+    cut_idx = len(sections)
+    for i, s in enumerate(sections):
+        if _CUT_FROM_RE.match(s["section_title"].strip()):
+            cut_idx = i
+            break
+    sections = sections[:cut_idx]
+
+    # Rebuild full_text from the filtered sections so it excludes the
+    # reference list and other noise.  Fall back to raw pages only when
+    # section parsing produced nothing at all.
+    if sections:
+        full_text = "\n".join(
+            "\n".join(filter(None, [s["section_title"], s["section_text"]]))
+            for s in sections
+        ).strip()
+    else:
+        full_text = _raw_full_text
+
     # Title heuristic: first non-empty line of page 1
     title = ""
     if pages:
@@ -112,9 +143,9 @@ def parse_pdf_file(path: Path) -> dict[str, Any]:
             abstract = s["section_text"]
             break
 
-    doi_m = DOI_RE.search(full_text)
-    pmcid_m = PMCID_RE.search(full_text)
-    pmid_m = PMID_RE.search(full_text)
+    doi_m = DOI_RE.search(_raw_full_text)
+    pmcid_m = PMCID_RE.search(_raw_full_text)
+    pmid_m = PMID_RE.search(_raw_full_text)
     doi = doi_m.group(0) if doi_m else ""
     pmcid = pmcid_m.group(0).upper() if pmcid_m else ""
     pmid = pmid_m.group(1) if pmid_m else ""

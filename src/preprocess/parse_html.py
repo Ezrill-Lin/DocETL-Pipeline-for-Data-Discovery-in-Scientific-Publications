@@ -130,9 +130,19 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
                     "page": None,
                 })
 
+    # Sections whose titles contain no dataset identifiers — skip entirely to
+    # avoid inflating the full_text and FDR prompt with irrelevant content.
+    _SKIP_SECTION_RE = re.compile(
+        r"^(author\s+contributions?|competing\s+interests?|conflict\s+of\s+interest|"
+        r"ethics?\s+(statement|declaration)s?|funding|declaration\s+of\s+competing)\b",
+        re.IGNORECASE,
+    )
+
     def walk(sec: Tag, path_parts: list[str]) -> None:
         title_tag = sec.find("title", recursive=False)
         title = _text(title_tag) if title_tag else ""
+        if title and _SKIP_SECTION_RE.match(title.strip()):
+            return
         # collect direct paragraph text plus captions
         text_parts: list[str] = []
         for child in sec.children:
@@ -175,6 +185,11 @@ def _extract_jats_sections(soup: BeautifulSoup) -> list[dict[str, Any]]:
     # <sec>. Harvest those plus any other notes/sec inside <back>.
     # Footnotes (<fn>) frequently carry the accession in older NIHMS papers.
     if back:
+        # Reference lists are pure bibliography — drop them before any walking
+        # so they never end up in full_text or sections.
+        for ref_list in back.find_all("ref-list"):
+            ref_list.decompose()
+
         for idx, note in enumerate(back.find_all("notes"), start=1):
             note_type = (note.get("notes-type") or "").strip()
             title_tag = note.find("title")
