@@ -16,3 +16,6 @@ outputs/*
 *.log
 .DS_Store
 datagatherer.pdf
+# LaTeX report files
+*.tex
+*.bib
