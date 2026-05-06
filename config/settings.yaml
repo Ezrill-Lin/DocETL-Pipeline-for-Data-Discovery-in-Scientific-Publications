@@ -6,7 +6,7 @@ paths:
   outputs_dir: outputs
 
 docetl:
-  default_model: gemini/gemini-2.5-flash
+  default_model: gpt-4o-mini
   pipeline_yaml: pipelines/pipeline_rtr.yaml
   intermediate_dir: data/processed/.docetl_cache
 

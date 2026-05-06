@@ -54,6 +54,7 @@ def run_pipeline(
     model: str | None = None,
     intermediate_dir: Path | None = None,
     cost_settings: dict[str, Any] | None = None,
+    max_threads: int | None = None,
 ) -> dict[str, Any]:
     """Render the YAML, run DocETL, and emit normalized predictions.
 
@@ -103,7 +104,7 @@ def run_pipeline(
 
     total_cost = 0.0
     try:
-        runner = DSLRunner.from_yaml(str(tmp_path))
+        runner = DSLRunner.from_yaml(str(tmp_path), max_threads=max_threads)
         try:
             total_cost = runner.load_run_save()
         except Exception as e:

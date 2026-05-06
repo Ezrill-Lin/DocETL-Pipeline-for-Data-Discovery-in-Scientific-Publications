@@ -183,6 +183,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip-rtr", action="store_true", help="Skip RTR pipeline.")
     p.add_argument("--skip-fdr", action="store_true", help="Skip FDR pipeline.")
     p.add_argument("--skip-datagatherer", action="store_true", help="Skip DataGatherer baseline.")
+    p.add_argument("--parallel", action="store_true",
+                   help="Run all extraction methods in parallel (default is sequential). "
+                        "Only safe when using models from different providers (e.g. Gemini for "
+                        "DocETL and OpenAI for DataGatherer) or on small paper sets where "
+                        "simultaneous API calls stay within rate limits.")
+    p.add_argument("--max-threads", type=int, default=3,
+                   help="Max concurrent LLM threads inside each DocETL pipeline. "
+                        "Lower values reduce API burst and 429 errors. "
+                        "Default 10 is safe for gpt-4o-mini Tier 1 (500 RPM / 200K TPM). "
+                        "Increase for Tier 2+ or Gemini which have higher limits.")
 
     args = p.parse_args(argv)
 
@@ -307,21 +317,23 @@ def main(argv: list[str] | None = None) -> int:
                 # Capture loop variables explicitly to avoid closure issues
                 _proc, _rtr_pred, _rtr_pipe, _model = processed, rtr_pred, rtr_pipeline, model
                 _cache = proc_base / f".docetl_cache_{benchmark}_{sm}_rtr"
+                _mt = args.max_threads
                 active["rtr"] = (
                     "DocETL RTR",
-                    lambda p=_proc, o=_rtr_pred, y=_rtr_pipe, m=_model, c=_cache: run_pipeline(
+                    lambda p=_proc, o=_rtr_pred, y=_rtr_pipe, m=_model, c=_cache, mt=_mt: run_pipeline(
                         input_path=p, output_path=o, pipeline_yaml=y,
-                        model=m, intermediate_dir=c, cost_settings=cost_cfg,
+                        model=m, intermediate_dir=c, cost_settings=cost_cfg, max_threads=mt,
                     ),
                 )
             if not args.skip_fdr:
                 _proc, _fdr_pred, _fdr_pipe, _model = processed, fdr_pred, fdr_pipeline, model
                 _cache = proc_base / f".docetl_cache_{benchmark}_{sm}_fdr"
+                _mt = args.max_threads
                 active["fdr"] = (
                     "DocETL FDR",
-                    lambda p=_proc, o=_fdr_pred, y=_fdr_pipe, m=_model, c=_cache: run_pipeline(
+                    lambda p=_proc, o=_fdr_pred, y=_fdr_pipe, m=_model, c=_cache, mt=_mt: run_pipeline(
                         input_path=p, output_path=o, pipeline_yaml=y,
-                        model=m, intermediate_dir=c, cost_settings=cost_cfg,
+                        model=m, intermediate_dir=c, cost_settings=cost_cfg, max_threads=mt,
                     ),
                 )
             if not args.skip_datagatherer:
@@ -348,14 +360,27 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{run_prefix} [stage 3]  DataGatherer (RTR+FDR) skipped (--skip-datagatherer)")
 
             if active:
-                running = ", ".join(label for label, _ in active.values())
-                print(f"{run_prefix} [stages 2-3] Running in parallel: {running}")
-                with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as pool:
-                    futures = {pool.submit(fn): (key, lbl) for key, (lbl, fn) in active.items()}
-                    for future in concurrent.futures.as_completed(futures):
-                        key, lbl = futures[future]
+                if args.parallel:
+                    running = ", ".join(label for label, _ in active.values())
+                    print(f"{run_prefix} [stages 2-3] Running in parallel (--parallel): {running}")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(active)) as pool:
+                        futures = {pool.submit(fn): (key, lbl) for key, (lbl, fn) in active.items()}
+                        for future in concurrent.futures.as_completed(futures):
+                            key, lbl = futures[future]
+                            try:
+                                summaries[key] = future.result()
+                                print(f"\n  [{lbl}] done:")
+                                print(json.dumps(summaries[key], indent=4))
+                            except Exception:
+                                print(f"\n  [{lbl}] FAILED:")
+                                traceback.print_exc()
+                else:
+                    print(f"{run_prefix} [stages 2-3] Running sequentially: "
+                          + ", ".join(lbl for lbl, _ in active.values()))
+                    for key, (lbl, fn) in active.items():
+                        print(f"{run_prefix} [stages 2-3] Starting {lbl}")
                         try:
-                            summaries[key] = future.result()
+                            summaries[key] = fn()
                             print(f"\n  [{lbl}] done:")
                             print(json.dumps(summaries[key], indent=4))
                         except Exception:
