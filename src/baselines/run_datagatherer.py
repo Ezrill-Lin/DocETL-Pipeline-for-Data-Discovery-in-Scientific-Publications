@@ -114,6 +114,27 @@ def _coerce_one_ref(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _approx_cost(input_tokens: int, settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Compute approximate cost from DataGatherer's input_tokens_total counter.
+
+    DataGatherer (0.2.1) only exposes ``input_tokens_total`` on the parser
+    chain — output tokens aren't tracked. We estimate output as ~10% of input
+    (matches DocETL's heuristic in ``src/extraction/run_docetl.py``) so the
+    two pipelines report comparable cost numbers.
+    """
+    settings = settings or {}
+    in_price = settings.get("default_input_price_per_1k", 0.00015)
+    out_price = settings.get("default_output_price_per_1k", 0.0006)
+    out_tokens = int(input_tokens * 0.1)
+    return {
+        "input_tokens_total": int(input_tokens),
+        "approx_output_tokens": out_tokens,
+        "approx_cost_usd": round(
+            (input_tokens / 1000) * in_price + (out_tokens / 1000) * out_price, 6
+        ),
+    }
+
+
 def _df_to_records(df: Any, papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group a DataGatherer joint DataFrame by paper URL.
 
@@ -154,6 +175,7 @@ def run_datagatherer(
     output_path: Path,
     strategy: str = "retrieve",
     llm_name: str | None = None,
+    cost_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run DataGatherer over our DocETL-style paper records.
 
@@ -162,6 +184,10 @@ def run_datagatherer(
         output_path: predictions JSONL path; same schema as DocETL's output.
         strategy: ``"retrieve"`` (Retrieve-Then-Read) or ``"full"`` (Full-Document Read).
         llm_name: LiteLLM-compatible model. Defaults to DOCETL_MODEL or ``gpt-4o-mini``.
+        cost_settings: dict with ``default_input_price_per_1k`` and
+            ``default_output_price_per_1k`` (typically the ``cost`` block of
+            ``config/settings.yaml``). Used to convert DataGatherer's
+            ``input_tokens_total`` counter into an approximate USD cost.
     """
     _alias_api_keys()
 
@@ -264,12 +290,18 @@ def run_datagatherer(
     flat = flatten_docetl_output(grouped)
     write_predictions(flat, output_path)
 
+    # DataGatherer accumulates input tokens on the orchestrator object
+    # (data_gatherer.data_gatherer:134, 744). Output tokens aren't tracked
+    # by the library, so we estimate them in _approx_cost.
+    input_tokens = int(getattr(dg, "input_tokens_total", 0) or 0)
+
     status.update({
         "status": "ok" if flat else "no_predictions",
         "elapsed_sec": round(time.time() - start, 1),
         "n_predictions": len(flat),
         "predictions_path": str(output_path),
         "raw_df_rows": raw_rows,
+        "cost": _approx_cost(input_tokens, cost_settings),
     })
     if not flat:
         status["error"] = (

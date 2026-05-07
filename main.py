@@ -175,6 +175,13 @@ def main(argv: list[str] | None = None) -> int:
                    help="Override the raw papers directory. Disables auto-fetch.")
     p.add_argument("--groundtruth", type=Path, default=None,
                    help="Override the benchmark file used for evaluation.")
+    p.add_argument("--benchmark-tag", default=None,
+                   help="Tag used in output paths instead of the benchmark name "
+                        "(e.g. 'rev_100' for a 100-paper REV smoke test). Lets a "
+                        "subsampled run coexist with the full run without overwriting. "
+                        "Affects data/processed/<tag>/, data/predictions/<tag>/, "
+                        "the metrics filename prefix, and the benchmark label in "
+                        "the report.")
     # ── Skip flags ─────────────────────────────────────────────────────────
     p.add_argument("--skip-preprocess", action="store_true",
                    help="Skip preprocessing; reuse existing papers.json.")
@@ -247,6 +254,11 @@ def main(argv: list[str] | None = None) -> int:
     for benchmark in benchmark_list:
         gt_path = Path(args.groundtruth) if args.groundtruth else _gt_defaults[benchmark]
 
+        # benchmark_tag namespaces all output paths so a 100-paper REV run
+        # can coexist with the full-REV run without overwriting it. Falls
+        # back to the bare benchmark name when no tag is set.
+        bm_key = args.benchmark_tag or benchmark
+
         if args.raw_dir is not None:
             raw_dir = (
                 REPO_ROOT / args.raw_dir
@@ -254,12 +266,12 @@ def main(argv: list[str] | None = None) -> int:
                 else Path(args.raw_dir)
             )
         else:
-            raw_dir = raw_base / benchmark
+            raw_dir = raw_base / bm_key
 
         # papers.json is per-benchmark (different papers for EXP vs REV)
-        processed = proc_base / benchmark / "papers.json"
+        processed = proc_base / bm_key / "papers.json"
 
-        bm_prefix = f"[{benchmark.upper()}]"
+        bm_prefix = f"[{bm_key.upper()}]"
 
         # ── Stage 0: Auto-download ─────────────────────────────────────────
         if args.skip_fetch or args.raw_dir is not None:
@@ -294,9 +306,9 @@ def main(argv: list[str] | None = None) -> int:
         # ══════════════════════════════════════════════════════════════════
         for model in model_list:
             sm = _safe_model(model)
-            run_prefix = f"[{benchmark.upper()}  {model}]"
+            run_prefix = f"[{bm_key.upper()}  {model}]"
 
-            pred_dir = pred_base / benchmark / sm
+            pred_dir = pred_base / bm_key / sm
             pred_dir.mkdir(parents=True, exist_ok=True)
 
             rtr_pred    = pred_dir / "rtr_predictions.jsonl"
@@ -304,10 +316,10 @@ def main(argv: list[str] | None = None) -> int:
             dg_rtr_pred = pred_dir / "datagatherer_rtr_predictions.jsonl"
             dg_fdr_pred = pred_dir / "datagatherer_fdr_predictions.jsonl"
 
-            m_rtr    = metrics_dir / f"{benchmark}_{sm}_rtr.json"
-            m_fdr    = metrics_dir / f"{benchmark}_{sm}_fdr.json"
-            m_dg_rtr = metrics_dir / f"{benchmark}_{sm}_datagatherer_rtr.json"
-            m_dg_fdr = metrics_dir / f"{benchmark}_{sm}_datagatherer_fdr.json"
+            m_rtr    = metrics_dir / f"{bm_key}_{sm}_rtr.json"
+            m_fdr    = metrics_dir / f"{bm_key}_{sm}_fdr.json"
+            m_dg_rtr = metrics_dir / f"{bm_key}_{sm}_datagatherer_rtr.json"
+            m_dg_fdr = metrics_dir / f"{bm_key}_{sm}_datagatherer_fdr.json"
 
             summaries: dict[str, Any] = {"rtr": None, "fdr": None, "dg_rtr": None, "dg_fdr": None}
 
@@ -316,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             if not args.skip_rtr:
                 # Capture loop variables explicitly to avoid closure issues
                 _proc, _rtr_pred, _rtr_pipe, _model = processed, rtr_pred, rtr_pipeline, model
-                _cache = proc_base / f".docetl_cache_{benchmark}_{sm}_rtr"
+                _cache = proc_base / f".docetl_cache_{bm_key}_{sm}_rtr"
                 _mt = args.max_threads
                 active["rtr"] = (
                     "DocETL RTR",
@@ -327,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if not args.skip_fdr:
                 _proc, _fdr_pred, _fdr_pipe, _model = processed, fdr_pred, fdr_pipeline, model
-                _cache = proc_base / f".docetl_cache_{benchmark}_{sm}_fdr"
+                _cache = proc_base / f".docetl_cache_{bm_key}_{sm}_fdr"
                 _mt = args.max_threads
                 active["fdr"] = (
                     "DocETL FDR",
@@ -341,14 +353,14 @@ def main(argv: list[str] | None = None) -> int:
                 active["dg_rtr"] = (
                     "DataGatherer RTR",
                     lambda p=_proc, o=_dg_rtr_pred, m=_model: run_datagatherer(
-                        p, o, strategy="retrieve", llm_name=m,
+                        p, o, strategy="retrieve", llm_name=m, cost_settings=cost_cfg,
                     ),
                 )
                 _proc, _dg_fdr_pred, _model = processed, dg_fdr_pred, model
                 active["dg_fdr"] = (
                     "DataGatherer FDR",
                     lambda p=_proc, o=_dg_fdr_pred, m=_model: run_datagatherer(
-                        p, o, strategy="full", llm_name=m,
+                        p, o, strategy="full", llm_name=m, cost_settings=cost_cfg,
                     ),
                 )
 
@@ -390,15 +402,15 @@ def main(argv: list[str] | None = None) -> int:
             # ── Stage 4: Evaluate ──────────────────────────────────────────
             if gt_path.exists():
                 print(f"{run_prefix} [stage 4] Evaluating against {gt_path.name}")
-                _run_evaluate(rtr_pred,    gt_path, m_rtr,    "rtr",              model=model, benchmark=benchmark)
-                _run_evaluate(fdr_pred,    gt_path, m_fdr,    "fdr",              model=model, benchmark=benchmark)
-                _run_evaluate(dg_rtr_pred, gt_path, m_dg_rtr, "datagatherer_rtr", model=model, benchmark=benchmark)
-                _run_evaluate(dg_fdr_pred, gt_path, m_dg_fdr, "datagatherer_fdr", model=model, benchmark=benchmark)
+                _run_evaluate(rtr_pred,    gt_path, m_rtr,    "rtr",              model=model, benchmark=bm_key)
+                _run_evaluate(fdr_pred,    gt_path, m_fdr,    "fdr",              model=model, benchmark=bm_key)
+                _run_evaluate(dg_rtr_pred, gt_path, m_dg_rtr, "datagatherer_rtr", model=model, benchmark=bm_key)
+                _run_evaluate(dg_fdr_pred, gt_path, m_dg_fdr, "datagatherer_fdr", model=model, benchmark=bm_key)
             else:
                 print(f"{run_prefix} [stage 4] No ground truth at {gt_path}; skipping evaluation.")
 
             all_run_summaries.append({
-                "benchmark": benchmark,
+                "benchmark": bm_key,
                 "model": model,
                 "rtr":    summaries["rtr"],
                 "fdr":    summaries["fdr"],
@@ -406,8 +418,16 @@ def main(argv: list[str] | None = None) -> int:
                 "dg_fdr": summaries["dg_fdr"],
             })
 
-    # ── Stage 5: Report ────────────────────────────────────────────────────
-    print("[stage 5] Generating report")
+    # ── Stage 5: Save runs.json (cost + time per (benchmark,model,method)) ──
+    runs_path = outputs_dir / "runs.json"
+    runs_path.write_text(json.dumps(all_run_summaries, indent=2), encoding="utf-8")
+    print(f"[stage 5] Per-run cost + time summary → {runs_path}")
+
+    # Console table for quick inspection.
+    _print_cost_time_table(all_run_summaries)
+
+    # ── Stage 6: Report ────────────────────────────────────────────────────
+    print("[stage 6] Generating report")
     generate_report(
         metrics_dir=metrics_dir,
         run_summaries=all_run_summaries,
@@ -415,6 +435,48 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"  → {report_path}")
     return 0
+
+
+def _print_cost_time_table(run_summaries: list[dict[str, Any]]) -> None:
+    """Print a compact per-run cost/time table to stdout."""
+    rows: list[tuple[str, str, str, str, str, str]] = [
+        ("Dataset", "Model", "Method", "Time(s)", "InTokens", "Cost($)"),
+    ]
+    method_keys = [
+        ("rtr",    "DocETL RTR"),
+        ("fdr",    "DocETL FDR"),
+        ("dg_rtr", "DG-RTR"),
+        ("dg_fdr", "DG-FDR"),
+    ]
+    for entry in run_summaries:
+        bm    = entry.get("benchmark", "")
+        model = entry.get("model", "")
+        for k, label in method_keys:
+            s = entry.get(k)
+            if not s:
+                continue
+            cost = s.get("cost", {}) or {}
+            in_tok = cost.get("input_tokens_total") or cost.get("approx_input_tokens") or "-"
+            cost_usd = (
+                cost.get("docetl_reported_cost_usd")
+                or cost.get("approx_cost_usd")
+                or "-"
+            )
+            rows.append((
+                bm, model, label,
+                str(s.get("elapsed_sec", "-")),
+                str(in_tok),
+                str(cost_usd),
+            ))
+    if len(rows) == 1:
+        return
+    widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]
+    print("\n=== Cost / Runtime per run ===")
+    for i, r in enumerate(rows):
+        line = "  ".join(c.ljust(widths[j]) for j, c in enumerate(r))
+        print(line)
+        if i == 0:
+            print("  ".join("-" * w for w in widths))
 
 
 if __name__ == "__main__":

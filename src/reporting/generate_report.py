@@ -188,6 +188,75 @@ def _failure_examples(metrics: dict[str, Any] | None, k: int = 5) -> str:
     return "\n".join(out) + "\n"
 
 
+# ── Cost / runtime table ──────────────────────────────────────────────────────
+
+def _build_cost_runtime_table(run_summaries: list[dict[str, Any]]) -> str:
+    """Render a 'Dataset | Model | Method | Time(s) | Tokens | Cost' table.
+
+    Pulls ``elapsed_sec`` and the ``cost`` sub-dict from each per-method
+    summary written by the wrappers in src/extraction/run_docetl.py and
+    src/baselines/run_datagatherer.py.
+    """
+    headers = ["Dataset", "Model", "Method", "Time (s)", "Input Tokens", "Cost (USD)"]
+    rows: list[list[str]] = []
+
+    def _fmt_secs(v: Any) -> str:
+        return f"{v:.1f}" if isinstance(v, (int, float)) else _fmt(v)
+
+    def _fmt_int(v: Any) -> str:
+        return f"{int(v):,}" if isinstance(v, (int, float)) else _fmt(v)
+
+    def _fmt_usd(v: Any) -> str:
+        return f"{v:.4f}" if isinstance(v, (int, float)) else _fmt(v)
+
+    method_keys = [
+        ("rtr",    "rtr"),
+        ("fdr",    "fdr"),
+        ("dg_rtr", "datagatherer_rtr"),
+        ("dg_fdr", "datagatherer_fdr"),
+    ]
+    for entry in run_summaries:
+        bm = entry.get("benchmark", "")
+        model = entry.get("model", "")
+        ds_display = _BENCHMARK_DISPLAY.get(bm, bm.upper())
+        m_display = _display_model(model)
+        for method_key, label_key in method_keys:
+            s = entry.get(method_key)
+            if not s:
+                continue
+            method_label = _METHOD_DISPLAY.get(label_key, label_key.upper())
+            cost = s.get("cost", {}) or {}
+            in_tok = (
+                cost.get("input_tokens_total")
+                or cost.get("approx_input_tokens")
+            )
+            cost_usd = (
+                cost.get("docetl_reported_cost_usd")
+                if cost.get("docetl_reported_cost_usd")
+                else cost.get("approx_cost_usd")
+            )
+            elapsed = s.get("elapsed_sec")
+            rows.append([
+                ds_display,
+                m_display,
+                method_label,
+                _fmt_secs(elapsed),
+                _fmt_int(in_tok),
+                _fmt_usd(cost_usd),
+            ])
+
+    if not rows:
+        return ""
+
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "|" + "---|" * len(headers),
+    ]
+    for r in rows:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def generate_report(
@@ -281,37 +350,21 @@ def generate_report(
             parts.append(_detail_table(met, section_label))
             parts.append(_failure_examples(met))
 
-    # ── Section 8: Cost / runtime ─────────────────────────────────────────────
-    cost_lines: list[str] = []
-    if run_summaries:
-        for entry in run_summaries:
-            bm = entry.get("benchmark", "")
-            model = entry.get("model", "")
-            prefix = f"{_BENCHMARK_DISPLAY.get(bm, bm.upper())} | {_display_model(model)}"
-            for method_key, label_key in [
-                    ("rtr",    "rtr"),
-                    ("fdr",    "fdr"),
-                    ("dg_rtr", "datagatherer_rtr"),
-                    ("dg_fdr", "datagatherer_fdr"),
-                ]:
-                s = entry.get(method_key)
-                if s:
-                    method_label = _METHOD_DISPLAY.get(label_key, label_key.upper())
-                    cost_lines.append(
-                        f"- {prefix} | {method_label}: {json.dumps(s.get('cost', s))}"
-                    )
-    else:
-        # Legacy fallback
+    # ── Section 3: Cost / runtime ─────────────────────────────────────────────
+    cost_table = _build_cost_runtime_table(run_summaries) if run_summaries else ""
+    if cost_table:
+        parts.append("\n## 3. Cost / Runtime\n\n" + cost_table + "\n")
+    elif any(s for s in (rtr_run_summary, fdr_run_summary, datagatherer_run_summary)):
+        # Legacy single-run fallback retained for backward compatibility
+        legacy_lines: list[str] = []
         for label, summary in [
             ("RTR", rtr_run_summary),
             ("FDR", fdr_run_summary),
             ("DataGatherer", datagatherer_run_summary),
         ]:
             if summary:
-                cost_lines.append(f"- {label}: {json.dumps(summary.get('cost', summary))}")
-
-    if cost_lines:
-        parts.append("\n## 3. Cost / Runtime\n\n" + "\n".join(cost_lines) + "\n")
+                legacy_lines.append(f"- {label}: {json.dumps(summary.get('cost', summary))}")
+        parts.append("\n## 3. Cost / Runtime\n\n" + "\n".join(legacy_lines) + "\n")
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)

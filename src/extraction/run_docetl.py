@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -103,6 +104,7 @@ def run_pipeline(
     from docetl.runner import DSLRunner
 
     total_cost = 0.0
+    start = time.time()
     try:
         runner = DSLRunner.from_yaml(str(tmp_path), max_threads=max_threads)
         try:
@@ -111,6 +113,7 @@ def run_pipeline(
             raise RuntimeError(f"DocETL pipeline execution failed: {e}") from e
     finally:
         tmp_path.unlink(missing_ok=True)
+    elapsed_sec = round(time.time() - start, 1)
 
     # Read raw outputs (DocETL writes a JSON array to `path`)
     if not raw_output.exists():
@@ -133,5 +136,6 @@ def run_pipeline(
         "predictions_path": str(output_path),
         "n_papers": len(papers if isinstance(papers, list) else []),
         "n_predictions": len(rows),
+        "elapsed_sec": elapsed_sec,
         "cost": cost_estimate,
     }
