@@ -19,3 +19,6 @@ datagatherer.pdf
 # LaTeX report files
 *.tex
 *.bib
+
+# WebDriver Manager cache
+.wdm/
