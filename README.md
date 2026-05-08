@@ -1,11 +1,11 @@
 # Dataset Reference Extraction with DocETL
 
-A DocETL-based pipeline that extracts dataset references (accession numbers,
-repository names, DOIs) from scientific papers, and an evaluation harness
-that scores it against the **DataRef-EXP** / **DataRef-REV** benchmarks
-released alongside [DataGatherer](https://github.com/VIDA-NYU/data-gatherer).
+A pipeline that extracts dataset references (accession numbers, repository
+names, DOIs) from scientific papers using LLMs, and an evaluation harness
+that scores results against the **DataRef-EXP** and **DataRef-REV** benchmarks
+from [DataGatherer](https://github.com/VIDA-NYU/data-gatherer).
 
-The pipeline emits one row per (paper, dataset reference):
+Each prediction is a row of the form:
 
 ```json
 {"paper_id": "PMC1234567", "paper_doi": "10.x/yz",
@@ -13,157 +13,157 @@ The pipeline emits one row per (paper, dataset reference):
  "url": "https://www.ebi.ac.uk/pride/archive/projects/PXD009876"}
 ```
 
-## Why this design
-
-- **Hybrid retrieval + LLM extraction.** Pure heading-based extraction
-  misses references buried in inline text and figure captions; pure
-  LLM-on-full-text is wasteful. We pre-select candidate passages by
-  heading match *and* by regex over repository names and accession-shaped
-  tokens, then ask the LLM to extract from the (much smaller) candidate
-  text.
-- **Deterministic URL construction.** The LLM extracts identifiers and
-  repository names but never URLs. URLs are templated in Python
-  (`src/extraction/url_builder.py`) from `config/repositories.yaml`. If
-  the repository is unknown, the URL field stays empty rather than being
-  fabricated.
+---
 
 ## Setup
 
+**Requirements:** Python 3.11+, [uv](https://github.com/astral-sh/uv)
+
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/Ezrill-Lin/DocETL-Pipeline-for-Data-Discovery-in-Scientific-Publications.git
+cd DocETL-Pipeline-for-Data-Discovery-in-Scientific-Publications
+uv sync
 cp .env.example .env
-# fill in OPENAI_API_KEY (or ANTHROPIC_API_KEY) and DOCETL_MODEL
+# Edit .env and fill in OPENAI_API_KEY
 ```
 
-`DOCETL_MODEL` selects the LiteLLM-compatible model (e.g. `gpt-4o-mini`,
-`claude-haiku-4-5-20251001`).
+> On Windows with OneDrive-synced paths, add `--link-mode=copy` to the `uv sync` call.
 
-## Project layout
+---
 
-```
-config/                 repositories + settings
-pipelines/              DocETL pipeline YAML
-src/preprocess/         HTML / PDF → structured paper records
-src/extraction/         DocETL runner + URL builder + output normalization
-src/evaluation/         ground truth loader + matcher + metrics
-src/baselines/          DataGatherer wrapper (best-effort)
-src/reporting/          Markdown report generator
-scripts/                CLI entry points
-tests/                  pytest unit tests
-data/                   raw papers, processed JSON, benchmark, predictions
-outputs/                metrics + final report
-```
+## Running the pipeline
 
-## How to run
-
-### 1. Download benchmark ground truth
+Everything runs through a single entry point:
 
 ```bash
-python scripts/download_benchmarks.py
+uv run python main.py [OPTIONS]
 ```
 
-Pulls every file from Zenodo record `15549086` into `data/benchmark/`. If
-network access is blocked, follow the manual instructions printed by the
-script and place the CSV ground-truth file there yourself.
+### Common examples
 
-### 2. Prepare paper inputs
+| Goal | Command |
+|---|---|
+| Full EXP benchmark (default) | `uv run python main.py` |
+| Full REV benchmark | `uv run python main.py --benchmark rev` |
+| Both benchmarks | `uv run python main.py --benchmarks exp,rev` |
+| Skip DataGatherer (DocETL only) | `uv run python main.py --skip-datagatherer` |
+| Reuse cached papers, skip fetch | `uv run python main.py --skip-fetch --skip-preprocess` |
+| DocETL only, no DG, RTR only | `uv run python main.py --skip-fdr --skip-datagatherer` |
+| Multiple models | `uv run python main.py --models gpt-4o-mini,gemini/gemini-2.0-flash` |
 
-Drop HTML, JATS XML, or PDF files into `data/raw/`, then:
+### All options
+
+```
+--benchmark {exp,rev}         Benchmark to run (default: exp)
+--benchmarks BENCHMARKS       Comma-separated list, e.g. exp,rev (overrides --benchmark)
+--format {xml,pdf}            EXP only: paper source format (default: xml)
+--model MODEL                 LLM model, overrides config/settings.yaml
+--models MODELS               Comma-separated models (overrides --model)
+--raw-dir RAW_DIR             Override raw papers directory; disables auto-fetch
+--groundtruth GROUNDTRUTH     Override benchmark ground-truth CSV
+--benchmark-tag TAG           Tag for output paths (e.g. rev_100 for a 100-paper smoke test)
+--skip-preprocess             Reuse existing papers.json
+--skip-fetch                  Skip downloading benchmark papers
+--skip-rtr                    Skip RTR pipeline
+--skip-fdr                    Skip FDR pipeline
+--skip-datagatherer           Skip DataGatherer baseline
+--parallel                    Run all extraction methods in parallel
+--max-threads N               Max concurrent LLM threads per DocETL pipeline (default: 10)
+```
+
+### What the pipeline does
+
+1. **Fetch** — Downloads paper XMLs from PMC and benchmark ground truth from Zenodo.
+2. **Preprocess** — Parses JATS XML into structured records with `candidate_passages` (for RTR) and `full_text` (for FDR).
+3. **Extract** — Runs up to four methods:
+   - **DocETL-RTR**: LLM reads candidate passages only (fast, lower recall).
+   - **DocETL-FDR**: LLM reads the full document (higher recall, higher cost).
+   - **DG-RTR**: DataGatherer with section-level retrieval.
+   - **DG-FDR**: DataGatherer with full-document read.
+4. **Evaluate** — Computes pair-level and triple-level precision / recall / F1 (micro and macro).
+5. **Report** — Writes `outputs/report.md` with a unified comparison table.
+
+---
+
+## Outputs
+
+| Path | Contents |
+|---|---|
+| `data/predictions/<benchmark>/<model>/rtr.jsonl` | DocETL-RTR predictions |
+| `data/predictions/<benchmark>/<model>/fdr.jsonl` | DocETL-FDR predictions |
+| `data/predictions/<benchmark>/<model>/datagatherer_rtr.jsonl` | DG-RTR predictions |
+| `data/predictions/<benchmark>/<model>/datagatherer_fdr.jsonl` | DG-FDR predictions |
+| `outputs/metrics/<benchmark>_<model>_rtr.json` | Full metrics for DocETL-RTR |
+| `outputs/metrics/<benchmark>_<model>_fdr.json` | Full metrics for DocETL-FDR |
+| `outputs/metrics/<benchmark>_<model>_datagatherer_rtr.json` | Full metrics for DG-RTR |
+| `outputs/metrics/<benchmark>_<model>_datagatherer_fdr.json` | Full metrics for DG-FDR |
+| `outputs/report.md` | Unified Markdown comparison report |
+
+---
+
+## Reproducibility benchmark (EXP)
+
+Because `gpt-4o-mini` is non-deterministic, we provide a script that runs
+DocETL RTR + FDR on DataRef-EXP N times and reports mean ± std:
 
 ```bash
-python scripts/prepare_inputs.py --input data/raw --output data/processed/papers.json
+uv run python scripts/benchmark_docetl_exp.py --runs 20 --max-threads 21
 ```
 
-This produces a JSON array of paper records, each with an extracted section
-tree and a `candidate_passages` field that the LLM will read.
+Results are saved to `outputs/docetl_exp_benchmark.json`.
 
-### 3. Run the DocETL extraction pipeline
-
-```bash
-python scripts/run_pipeline.py \
-  --input data/processed/papers.json \
-  --output data/predictions/docetl_predictions.jsonl
-```
-
-The pipeline writes raw DocETL output to
-`data/predictions/docetl_predictions.raw.json`, then flattens / URL-builds
-into `docetl_predictions.jsonl`. Cost / token estimates land in
-`outputs/cost_docetl.json`.
-
-### 4. Evaluate
-
-```bash
-python scripts/evaluate_docetl.py \
-  --predictions data/predictions/docetl_predictions.jsonl \
-  --groundtruth data/benchmark/EXP_groundtruth.csv \
-  --output outputs/metrics_docetl.json
-```
-
-Computes pair-level and repository-aware (triple-level) precision /
-recall / F1, plus per-paper macro averages, coverage, and failure
-categories.
-
-### 5. (Optional) Run DataGatherer baseline
-
-```bash
-pip install git+https://github.com/VIDA-NYU/data-gatherer
-python -c "from src.baselines.run_datagatherer import run_datagatherer; \
-           run_datagatherer('data/processed/papers.json', \
-                            'data/predictions/datagatherer_predictions.jsonl')"
-```
-
-`src/baselines/run_datagatherer.py` probes a few known entry points; if
-your installed version exposes a different API, edit
-`_build_extractor()`. If DataGatherer is unavailable the wrapper writes
-an empty predictions file and the evaluation continues without it.
-
-### 6. End-to-end
-
-```bash
-python scripts/run_all.py --groundtruth data/benchmark/EXP_groundtruth.csv
-```
-
-Each stage is best-effort — missing inputs or failed sub-runs are logged
-and the next stage continues. The final markdown report is written to
-`outputs/report.md`.
+---
 
 ## Tests
 
 ```bash
-pytest tests/ -q
+uv run pytest tests/ -q
 ```
 
-21 unit tests cover URL construction, identifier and repository
-normalization, paper-key matching, and metric computation.
+Unit tests cover URL construction, identifier normalisation, paper-key
+matching, and metric computation.
 
-## Outputs
+---
 
-- `data/predictions/docetl_predictions.jsonl` — one row per dataset reference
-- `outputs/cost_docetl.json` — token/cost estimate for the DocETL run
-- `outputs/metrics_docetl.json` — full metrics + failure categories
-- `outputs/metrics_datagatherer.json` — same, if the baseline ran
-- `outputs/report.md` — narrative comparison
+## Project layout
+
+```
+config/                 repositories.yaml, settings.yaml
+pipelines/              DocETL pipeline YAMLs (RTR + FDR)
+src/
+  preprocess/           JATS XML / PDF → structured paper records
+  extraction/           DocETL runner, URL builder, output normalisation
+  evaluation/           Ground-truth loader, pair/triple matcher, metrics
+  baselines/            DataGatherer wrapper
+  reporting/            Markdown report generator
+scripts/                Utility scripts (benchmark, token estimation, etc.)
+tests/                  pytest unit tests
+data/
+  raw/                  Downloaded paper XMLs
+  processed/            Preprocessed paper JSON
+  benchmark/            Ground-truth CSVs
+  predictions/          Per-method JSONL output
+outputs/                Metrics JSON + report.md
+```
+
+---
 
 ## Known limitations
 
-- **Cost tracking is approximate.** DocETL reports a total cost via
-  `load_run_save()`; per-paper attribution is estimated from input
-  character counts.
-- **PDF parsing.** Heading detection on PDFs is heuristic. JATS XML or
-  PMC HTML produces much better structure than scanned PDFs.
-- **DataGatherer API drift.** The baseline wrapper probes plausible
-  entry points; for older / forked versions you may need to edit
-  `_build_extractor` or run DataGatherer manually and drop its
-  predictions into `data/predictions/datagatherer_predictions.jsonl`.
-- **URL templates.** `config/repositories.yaml` covers the repositories
-  in the project spec. For others, the URL field is left empty; we never
-  fabricate URLs.
-- **Ground truth column names.** The loader tries common column names
-  (`accession`, `dataset_identifier`, `database`, `repository`, …). If
-  your benchmark CSV uses different headers, edit
-  `src/evaluation/load_groundtruth.py:COLUMN_CANDIDATES`.
+- **DG-RTR on REV**: A network outage during our REV run left ~45 % of papers with empty output; those metrics are underestimated. Re-run with a stable connection for a fair comparison.
+- **Cost tracking**: DocETL reports a framework-level total. Per-paper cost is estimated from character counts. DataGatherer only exposes input tokens (output estimated at 10 %).
+- **URL templates**: `config/repositories.yaml` covers the repositories in the benchmark. Unknown repositories get an empty URL field — URLs are never fabricated.
+- **PDF parsing**: Heading detection on PDFs is heuristic. JATS XML produces better structure.
 
-## API keys and secrets
+---
 
-`.env` is read at runtime. Never commit a populated `.env`. The
-`.env.example` file is the only one tracked in version control.
+## API keys
+
+Copy `.env.example` to `.env` and fill in your key:
+
+```
+OPENAI_API_KEY=sk-...
+```
+
+Never commit a populated `.env`. Only `.env.example` is tracked.
+
